@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "context-reference-set-v1",
+  "title": "ContextReferenceSet",
+  "type": "object",
+  "required": ["reference_schema_version", "references"],
+  "properties": {
+    "reference_schema_version": {"const": "context-references-v1"},
+    "trace_id": {"type": "string", "maxLength": 128},
+    "references": {
+      "type": "array",
+      "description": "Dynamic semantic reference list. The selected H3 workflow independently checks its actual attachment capacity.",
+      "items": {
+        "type": "object",
+        "required": ["image_id", "source_path", "sha256", "product_id", "subject_id", "reference_role", "width", "height", "source_type", "image_description", "analysis_status", "native_label"],
+        "properties": {
+          "image_id": {"type": "string", "minLength": 1},
+          "source_path": {"type": ["string", "null"]},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "product_id": {"type": ["string", "null"]},
+          "subject_id": {"type": ["string", "null"]},
+          "reference_role": {"type": "string"},
+          "width": {"type": ["integer", "null"], "minimum": 1},
+          "height": {"type": ["integer", "null"], "minimum": 1},
+          "source_type": {"type": "string"},
+          "image_description": {"type": "string"},
+          "analysis_status": {"type": "string"},
+          "native_label": {"type": "string", "pattern": "^<Picture [1-9][0-9]*>$"}
+        }
+      }
+    }
+  }
+}

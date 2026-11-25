@@ -1,0 +1,596 @@
+import { QualityDurationWarning } from '../components/QualitySettings';
+import {
+  Check,
+  CircleAlert,
+  Film,
+  ImageOff,
+  LoaderCircle,
+  PlayCircle,
+  RefreshCw,
+  RotateCcw,
+  ShieldCheck,
+  Sparkles,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
+import { api, ApiError, type RevisionImageDraft, type VideoRevisionInput, type VideoRevisionPreview } from "../lib/api";
+import { formatBytes, formatDate, formatDuration, statusLabel } from "../lib/format";
+import type { Project, QualityCheck, VideoRevision } from "../lib/types";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ProjectPicker } from "../components/ProjectPicker";
+import { RevisionReferencePicker } from "../components/RevisionReferencePicker";
+import { useToast } from "../components/ToastProvider";
+import { Badge, EmptyState, ErrorState, FormField, LoadingState, PageHeader } from "../components/ui";
+
+const defaultInstruction = "保持当前绑定人物的脸型、发型、固定特征和服装不变；镜头运动更缓慢，保持动作连续，避免手部穿模。";
+const activeRevisionStatuses = ['queued', 'running', 'submitting', 'submitted', 'postprocessing'];
+type RevisionFailure = { videoId: string; stage: 'preview' | 'submit' | 'processing'; message: string; referenceError: boolean; input?: VideoRevisionInput };
+const isReferenceError = (message: string, code?: string | null) => /产品|product|identity|身份|人物参考/i.test(`${code ?? ''} ${message}`);
+
+export function ReviewPage() {
+  const location = useLocation();
+  const [, setSearchParams] = useSearchParams();
+  const videoRequest = useRef(0), projectRequest = useRef(0), currentSearch = useRef(location.search);
+  currentSearch.current = location.search;
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectId, setProjectId] = useState("");
+  const [videos, setVideos] = useState<VideoRevision[]>([]);
+  const [revisionSelection, setRevisionSelection] = useState({ selectedId: "", instruction: defaultInstruction, useProjectVideoService: false, images: [] as RevisionImageDraft[] });
+  const { selectedId, instruction, useProjectVideoService, images } = revisionSelection;
+  const [uploadingVideoId, setUploadingVideoId] = useState('');
+  // Select the version and initialize its draft atomically. A passive effect
+  // must never restore defaults after the newly visible editor has been edited.
+  const setSelectedId = useCallback((value: string | ((current: string) => string)) => {
+    setRevisionSelection(current => {
+      const next = typeof value === "function" ? value(current.selectedId) : value;
+      return next === current.selectedId ? current : { selectedId: next, instruction: defaultInstruction, useProjectVideoService: false, images: [] };
+    });
+  }, []);
+  const setInstruction = (value: string) => setRevisionSelection(current => current.selectedId === selectedId ? { ...current, instruction: value } : current);
+  const setUseProjectVideoService = (value: boolean) => setRevisionSelection(current => current.selectedId === selectedId ? { ...current, useProjectVideoService: value } : current);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState("");
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
+  const [approveOpen, setApproveOpen] = useState(false);
+  const [approvalOperator, setApprovalOperator] = useState("local-user");
+  const [approvalReason, setApprovalReason] = useState("");
+  const [mediaFailed, setMediaFailed] = useState(false);
+  const [revisionPreview, setRevisionPreview] = useState<{ videoId: string; input: VideoRevisionInput; result: VideoRevisionPreview } | null>(null);
+  const previewRequest = useRef<AbortController | null>(null);
+  const [revisionJobId, setRevisionJobId] = useState("");
+  const [revisionJobPhase, setRevisionJobPhase] = useState("");
+  const [revisionError, setRevisionError] = useState<RevisionFailure | null>(null);
+  const { notify } = useToast();
+
+  const selected = videos.find((video) => video.id === selectedId) ?? null;
+  const selectedVersion = useRef(selected);
+  selectedVersion.current=selected;
+  const processing = (selected?.metadata?.revision_postprocess ?? selected?.metadata_json?.revision_postprocess) as {state?:string;job_id?:string}|undefined;
+  const recovery = (selected?.metadata?.revision_processing_recovery ?? selected?.metadata_json?.revision_processing_recovery) as {available?:boolean;required?:boolean;state?:string;reason?:string;final_video_id?:string}|undefined;
+  const lastRevision = (selected?.metadata?.latest_revision_job ?? selected?.metadata_json?.latest_revision_job) as
+    {id:string;status:string;error_message?:string|null}|undefined;
+  const incompleteRevision = Boolean(processing && processing.state !== 'ready') || Boolean(recovery?.required && recovery.state !== 'ready');
+  const reviewedRevision = revisionPreview?.videoId === selectedId ? revisionPreview : null;
+  const selectedRevisionError = revisionError?.videoId === selectedId && (!revisionError.input ||
+    (revisionError.input.instruction === instruction.trim() && revisionError.input.use_project_video_service === useProjectVideoService)) ? revisionError : null;
+  const clearRevisionPreview = useCallback(() => {
+    previewRequest.current?.abort();
+    setRevisionPreview(null);
+  }, []);
+  function changeRevisionImages(videoId: string, update: (current: RevisionImageDraft[]) => RevisionImageDraft[]) {
+    if (selectedVersion.current?.id !== videoId) return;
+    setRevisionSelection(current => current.selectedId === videoId ? { ...current, images: update(current.images) } : current);
+    clearRevisionPreview();
+    setRevisionError(null);
+  }
+  useEffect(() => () => previewRequest.current?.abort(), []);
+
+  const loadVideos = useCallback(async (id: string) => {
+    const requestId = ++videoRequest.current;
+    const search = location.search;
+    if (!id) {
+      setVideos([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await api.listVideos(id);
+      if (requestId !== videoRequest.current || currentSearch.current !== search) return;
+      const ordered = result.sort((a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime());
+      setVideos(ordered);
+      const requested = new URLSearchParams(location.search);
+      const requestedVideo = ordered.find(video => video.id === requested.get('video'))
+        ?? ordered.find(video => video.generationJobId === requested.get('job'))
+        ?? ordered.find(video => video.shotId === requested.get('shot'));
+      setSelectedId((current) => requestedVideo?.id ?? (ordered.some((video) => video.id === current) ? current : ordered[0]?.id ?? ""));
+      setError("");
+    } catch (cause) {
+      if (requestId === videoRequest.current && currentSearch.current === search) setError(cause instanceof Error ? cause.message : "成片列表加载失败");
+    } finally {
+      if (requestId === videoRequest.current && currentSearch.current === search) setLoading(false);
+    }
+  }, [location.search, setSelectedId]);
+
+  const initialLoad = useCallback(async () => {
+    const requestId = ++projectRequest.current;
+    const search = location.search;
+    setLoading(true);
+    setError("");
+    try {
+      const nextProjects = await api.listProjects();
+      if (requestId !== projectRequest.current || currentSearch.current !== search) return;
+      setProjects(nextProjects);
+      const requested = new URLSearchParams(location.search).get("project");
+      const target = nextProjects.find((project) => project.id === requested)?.id ?? nextProjects[0]?.id ?? "";
+      setProjectId(target);
+      if (target) await loadVideos(target);
+      else setLoading(false);
+    } catch (cause) {
+      if (requestId === projectRequest.current && currentSearch.current === search) {
+        setError(cause instanceof Error ? cause.message : "无法加载成片审核");
+        setLoading(false);
+      }
+    }
+  }, [loadVideos, location.search]);
+
+  useEffect(() => {
+    void initialLoad();
+    return () => { ++projectRequest.current; ++videoRequest.current; };
+  }, [initialLoad]);
+
+  useEffect(() => {
+    clearRevisionPreview();
+    setRejectOpen(false);
+    setRejectReason("");
+    setMediaFailed(false);
+    setRevisionError(null);
+  }, [clearRevisionPreview, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    let active = true;
+    void api
+      .getVideo(selectedId)
+      .then((detail) => {
+        if (active) setVideos((current) => current.map((video) => (video.id === detail.id ? detail : video)));
+      })
+      .catch((cause) => {
+        if (active) notify(cause instanceof Error ? cause.message : "视频详情加载失败", "error");
+      });
+    return () => {
+      active = false;
+    };
+  }, [notify, selectedId]);
+
+  const shotVersions = useMemo(
+    () =>
+      selected
+        ? videos.filter((video) => video.shotId === selected.shotId).sort((a, b) => b.revision - a.revision)
+        : [],
+    [selected, videos],
+  );
+
+  async function runQualityCheck() {
+    if (!selected) return;
+    setBusy("quality");
+    try {
+      await api.runQualityCheck(selected.id);
+      const refreshed = await api.getVideo(selected.id);
+      setVideos((current) => current.map((video) => (video.id === refreshed.id ? refreshed : video)));
+      notify("文件级质检已完成；未配置的检测项会如实显示不可用", "success");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "质检失败", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  useEffect(() => {
+    setRevisionJobId('');setRevisionJobPhase('');
+  }, [projectId]);
+
+  useEffect(() => {
+    // A project reset must restore its selected raw revision even if the
+    // processing metadata has not changed. Old-project details may arrive
+    // while the next project's list is loading, so check ownership first.
+    if (!projectId || (selected?.projectId ?? selected?.project_id) !== projectId) return;
+    if (processing?.state === 'processing' && processing.job_id) {
+      setRevisionJobId(processing.job_id);setRevisionJobPhase('postprocessing');
+    } else if (lastRevision && activeRevisionStatuses.includes(lastRevision.status)) {
+      setRevisionJobId(lastRevision.id);setRevisionJobPhase(lastRevision.status);
+    }
+  }, [projectId,selected?.projectId,selected?.project_id,processing?.job_id,processing?.state,lastRevision?.id,lastRevision?.status]);
+
+  useEffect(() => {
+    if (!revisionJobId) return;
+    const revisionVideoId = selectedVersion.current?.id ?? '';
+    let live=true,pending=false;
+    const timer = window.setInterval(async () => {
+      if (pending) return;
+      pending=true;
+      try {
+        const job=await api.getJob(revisionJobId);
+        if (!live) return;
+        setRevisionJobPhase(job.status);
+        if (!activeRevisionStatuses.includes(job.status)) {
+          await loadVideos(projectId);
+          if (!live) return;
+          const plan=(job.parameters?.revision_postprocess ?? job.parameters_json?.revision_postprocess) as {state?:string;final_video_id?:string;error?:{message?:string;code?:string}}|undefined;
+          if (plan?.state==='ready' && plan.final_video_id && selectedVersion.current?.shotId===(job.shotId||job.shot_id)) {
+            const finalId=plan.final_video_id;
+            setSelectedId(finalId);
+            setSearchParams(current=>{const next=new URLSearchParams(current);next.set('project',projectId);next.set('video',finalId);return next;});
+          }
+          setRevisionJobId('');
+          if (job.status==='failed'||job.status==='unknown'||job.status==='cancelled'||plan?.state==='failed'||plan?.state==='blocked') {
+            const message=job.errorMessage || plan?.error?.message || '修订尚未完成，请核对原任务；原片已保留';
+            setRevisionError({videoId:revisionVideoId,stage:'processing',message,referenceError:isReferenceError(message,job.errorCode || plan?.error?.code)});
+            notify(message,'error');
+          } else if (['generated','succeeded','approved','revised'].includes(job.status)) {
+            setRevisionError(null);
+            notify('修订任务已完成，请检查最新完整版本的画面与声音','success');
+          }
+        }
+      } catch { if(live)setRevisionJobPhase('connection_wait'); }
+      finally {pending=false;}
+    },2500);
+    return () => {live=false;window.clearInterval(timer);};
+  }, [revisionJobId, projectId, loadVideos, notify,setSelectedId,setSearchParams]);
+
+  async function resumeProcessing() {
+    if (!selected) return;
+    setRevisionError(null);
+    setBusy('resume-processing');
+    try {
+      const result=await api.resumeRevisionProcessing(selected.id);
+      setRevisionJobId(result.job.id);setRevisionJobPhase('postprocessing');
+      await loadVideos(projectId);
+      notify('已使用现有原片恢复配音与画质处理，不重新生成视频','success');
+    } catch(cause) {
+      const message=cause instanceof Error?cause.message:'恢复后处理失败';
+      setRevisionError({videoId:selected.id,stage:'processing',message,referenceError:isReferenceError(message,cause instanceof ApiError?cause.code:undefined)});
+      notify(message,'error');
+    }
+    finally {setBusy('');}
+  }
+
+  async function revise(confirmed = false) {
+    if (!selected || (!instruction.trim() && !images.length) || uploadingVideoId === selected.id
+        || (confirmed && !reviewedRevision)) return;
+    const input: VideoRevisionInput = confirmed && reviewedRevision ? {
+      ...reviewedRevision.input,
+      ...(reviewedRevision.result.reference_preview_sha256 ? { reference_preview_sha256: reviewedRevision.result.reference_preview_sha256 } : {}),
+    } : {
+      instruction: instruction.trim(), use_project_video_service: useProjectVideoService,
+      ...(images.length ? { reference_images: images.map(image => ({ image_id: image.id, target_id: image.targetId || null })) } : {}),
+    };
+    const controller = confirmed ? undefined : new AbortController();
+    if (controller) previewRequest.current = controller;
+    setRevisionError(null);
+    setBusy("revise");
+    try {
+      if (controller) {
+        const result = await api.previewVideoRevision(selected.id, input, controller.signal);
+        if (!controller.signal.aborted) setRevisionPreview({ videoId: selected.id, input, result });
+        return;
+      }
+      const result = await api.reviseVideo(selected.id, input);
+      clearRevisionPreview();
+      if (result.job) {
+        setRevisionJobId(result.job.id);
+        setRevisionJobPhase('submitted');
+      }
+      await loadVideos(projectId);
+      notify("修订生成已提交；旧视频仍保留在版本历史中", "success");
+    } catch (cause) {
+      if (!controller?.signal.aborted) {
+        const message=cause instanceof Error ? cause.message : confirmed ? "提交修订失败" : "修订预览失败";
+        if (confirmed) clearRevisionPreview();
+        setRevisionError({videoId:selected.id,stage:confirmed?'submit':'preview',message,input,referenceError:isReferenceError(message,cause instanceof ApiError?cause.code:undefined)});
+        notify(message, "error");
+      }
+    } finally {
+      if (controller && previewRequest.current === controller) previewRequest.current = null;
+      setBusy("");
+    }
+  }
+
+  async function approve() {
+    if (!selected) return;
+    setBusy("approve");
+    try {
+      const updated = await api.approveVideo(selected.id, { operator: approvalOperator.trim() || "local-user", reason: approvalReason.trim() || undefined });
+      setVideos((current) => current.map((video) => (video.id === updated.id ? updated : video)));
+      setApproveOpen(false);
+      notify("人工审核已通过，此版本已锁为候选成片", "success");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "审核通过失败", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function reject() {
+    if (!selected || !rejectReason.trim()) return;
+    setBusy("reject");
+    try {
+      const updated = await api.rejectVideo(selected.id, rejectReason.trim());
+      setVideos((current) => current.map((video) => (video.id === updated.id ? updated : video)));
+      setRejectOpen(false);
+      notify("已记录驳回原因，可继续填写修改指令并重做", "success");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "驳回失败", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const metadata = selected?.metadata ?? selected?.metadata_json ?? {};
+  const provider = String(metadata.provider || "").toLowerCase();
+  const service = metadata.service_snapshot as { provider?: string; is_cloud?: boolean } | undefined;
+  const cloudSource = metadata.mode === "cloud" || provider.startsWith("cloud_") || service?.provider === "video_api" || service?.is_cloud === true;
+  const showLocalRecovery = images.length > 0 || cloudSource || !(metadata.mode === "local" || metadata.mode === "demo" || provider === "comfyui_h3" || provider === "demo");
+  const productionParams = new URLSearchParams({ project: selected?.projectId || projectId });
+  if (selected?.shotId) productionParams.set("shot", selected.shotId);
+  const qualityChecks = selected?.qualityChecks ?? selected?.quality_checks ?? [];
+  const mediaSrc = selected ? api.mediaUrl(selected.mediaUrl ?? selected.media_url ?? selected.relativePath ?? selected.relative_path, selected.id) : "";
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="创作流程 · 04"
+        title="成片审核"
+        description="自动检查只提供证据；只有人工通过的版本才会成为候选成片。"
+        actions={
+          <ProjectPicker
+            projects={projects}
+            value={projectId}
+            onChange={(id) => {
+              const next = new URLSearchParams(location.search);
+              next.set('project', id);
+              for (const key of ['shot','video','job','quality_render','qualityrender','workspace']) next.delete(key);
+              setSearchParams(next, {replace:true});
+            }}
+          />
+        }
+      />
+
+      {error ? <ErrorState message={error} onRetry={initialLoad} /> : null}
+      {loading ? <LoadingState label="正在读取成片版本…" /> : null}
+
+      {!loading && !videos.length ? (
+        <EmptyState title="还没有待审核视频" description="生成任务成功后，每个视频版本都会在这里保留并独立审核。" />
+      ) : null}
+
+      {!loading && videos.length ? (
+        <section className="review-layout">
+          <aside className="card review-list" aria-label="待审核视频列表">
+            <div className="section-heading compact">
+              <div><p className="eyebrow">项目成片</p><h2>{videos.length} 个版本</h2></div>
+              <button className="icon-button" type="button" onClick={() => loadVideos(projectId)} aria-label="刷新成片列表"><RefreshCw size={17} /></button>
+            </div>
+            <div className="video-version-list">
+              {videos.map((video) => {
+                const thumb = (video.thumbnailPaths ?? video.thumbnail_paths_json ?? [])[0];
+                return (
+                  <button className={`video-version-button${video.id === selectedId ? " active" : ""}`} type="button" key={video.id} onClick={() => setSelectedId(video.id)}>
+                    <span className="video-thumb">
+                      {thumb ? <img src={api.mediaUrl(thumb)} alt="视频缩略图" /> : <Film size={22} />}
+                      <span>v{video.revision}</span>
+                    </span>
+                    <span className="video-version-copy">
+                      <strong>镜头 {video.shotId?.slice(0, 8) ?? "—"}</strong>
+                      <small>{formatDate(video.createdAt)}</small>
+                    </span>
+                    <Badge status={video.reviewStatus} />
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+
+          {selected ? (
+            <div className="review-main">
+              <article className="card player-card">
+                <div className="player-toolbar">
+                  <div>
+                    <div className="title-with-badge">
+                      <h2>镜头版本 v{selected.revision}</h2>
+                      <Badge status={selected.reviewStatus} />
+                      {String(metadata.provider ?? "").toLowerCase().includes("demo") ? <Badge tone="demo">DEMO</Badge> : null}
+                    </div>
+                    <p>生成于 {formatDate(selected.createdAt)}</p>
+                  </div>
+                  <div className="metadata-line">
+                    <span>{formatDuration(Number(metadata.duration_seconds ?? metadata.duration))}</span>
+                    <span>{metadata.width && metadata.height ? `${metadata.width}×${metadata.height}` : "分辨率待检查"}</span>
+                    <span>{formatBytes(Number(metadata.file_size ?? metadata.size))}</span>
+                  </div>
+                </div>
+                <div className="video-player-wrap">
+                  {mediaSrc && !mediaFailed && metadata.playable_video !== false ? (
+                    <video
+                      key={mediaSrc}
+                      controls
+                      preload="metadata"
+                      src={mediaSrc}
+                      onError={() => setMediaFailed(true)}
+                      aria-label={`镜头版本 ${selected.revision} 视频播放器`}
+                    >
+                      当前浏览器无法播放此视频。
+                    </video>
+                  ) : (
+                    <div className="media-unavailable" role="alert">
+                      <ImageOff size={30} />
+                      <strong>视频暂时无法播放</strong>
+                      <p>{metadata.playable_video === false ? "当前 Demo Provider 只生成显式状态回放，不会伪装成可播放视频。" : mediaSrc ? "媒体加载失败，请检查受控媒体路由和文件是否存在。" : "该版本没有可访问的媒体地址。"}</p>
+                    </div>
+                  )}
+                </div>
+                <QualityDurationWarning metadata={metadata} videoId={selected.id}/>
+                <div className="reference-summary">
+                  <div>
+                    <span>生成提示词</span>
+                    <p>{selected.prompt ?? String(metadata.prompt ?? "未记录")}</p>
+                    {metadata.revision_instruction ? <><span>本次修订要求</span><p>{String(metadata.revision_instruction)}</p><details><summary>原始提示词</summary><p>{String(metadata.original_prompt || "未记录")}</p></details></> : null}
+                  </div>
+                  <div>
+                    <span>人物参考</span>
+                    <p>角色：{String(metadata.character_id || "未记录")} · 版本：{String(metadata.character_version_id || "未记录")} · ComfyUI ID：{String(metadata.comfyui_prompt_id || "未记录")}</p>
+                    <div className="reference-preview">{(selected.referenceAssets || []).map((asset, index) => <figure key={String(asset.asset_id)}><img src={api.mediaUrl(String(asset.relative_path))} alt={`实际参考 Picture ${index + 1}`} /><figcaption>{`<Picture ${index + 1}>`} · {String(asset.asset_id)}</figcaption></figure>)}</div>
+                  </div>
+                </div>
+              </article>
+
+              <div className="review-columns">
+                <article className="card quality-card">
+                  <div className="section-heading compact">
+                    <div><p className="eyebrow">客观证据</p><h2>自动检查结果</h2></div>
+                    <button className="button button-secondary button-small" type="button" onClick={runQualityCheck} disabled={busy === "quality"}>
+                      {busy === "quality" ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}
+                      运行质检
+                    </button>
+                  </div>
+                  {qualityChecks.length ? (
+                    <div className="quality-list">
+                      {qualityChecks.map((check) => <QualityRow check={check} key={check.id} />)}
+                    </div>
+                  ) : (
+                    <div className="compact-empty"><CircleAlert size={20} /><p>尚未运行自动质检。</p></div>
+                  )}
+                  <div className="inline-notice">
+                    人脸一致性模型未配置时会显示“不可用”，绝不会填入虚构相似度。
+                  </div>
+                </article>
+
+                <article className="card human-review-card">
+                  <p className="eyebrow">人工决策</p>
+                  <h2>人工审核状态</h2>
+                  <div className="manual-state">
+                    <span className={`manual-icon ${selected.reviewStatus}`}>
+                      {selected.reviewStatus === "approved" ? <Check size={22} /> : selected.reviewStatus === "rejected" ? <X size={22} /> : <PlayCircle size={22} />}
+                    </span>
+                    <div><strong>{statusLabel(selected.reviewStatus)}</strong><p>{selected.reviewReason ?? "尚未留下人工审核理由。"}</p></div>
+                  </div>
+                  {rejectOpen ? (
+                    <div className="reject-box">
+                      <FormField label="驳回原因" required>
+                        <textarea rows={3} value={rejectReason} onChange={(event) => setRejectReason(event.target.value)} placeholder="说明需要重做的具体问题…" />
+                      </FormField>
+                      <div className="form-actions">
+                        <button className="button button-secondary button-small" type="button" onClick={() => setRejectOpen(false)}>取消</button>
+                        <button className="button button-danger button-small" type="button" onClick={reject} disabled={!rejectReason.trim() || busy === "reject"}>
+                          {busy === "reject" ? <LoaderCircle className="spin" size={14} /> : <X size={14} />} 驳回并记录
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="human-actions">
+                      <button className="button button-secondary" type="button" onClick={() => setRejectOpen(true)} disabled={selected.reviewStatus === "approved"}>驳回并重做</button>
+                      <button className="button button-primary" type="button" onClick={() => setApproveOpen(true)} disabled={selected.reviewStatus === "approved" || incompleteRevision}>
+                        <Check size={16} /> 通过为候选成片
+                      </button>
+                    </div>
+                  )}
+                </article>
+              </div>
+
+              <article className="card revision-card">
+                <div className="section-heading">
+                  <div><p className="eyebrow">参考约束的再生成</p><h2>修改指令</h2><p>这不是逐帧精准修补，也不保证未指定像素完全不变。</p></div>
+                  <Badge tone="neutral">旧版本保留</Badge>
+                </div>
+                <FormField label="本次修改要求" required={!images.length} hint="可描述要改动的动作、画面或外观。图片修订使用本地 Context-IR H3。">
+                  <textarea rows={4} value={instruction} aria-describedby={selectedRevisionError ? 'revision-error' : undefined} onChange={(event) => { setInstruction(event.target.value); clearRevisionPreview(); setRevisionError(null); }} />
+                </FormField>
+                <RevisionReferencePicker key={selected.id} videoId={selected.id} images={images}
+                  disabled={Boolean(revisionJobId) || busy === 'revise'} onChange={changeRevisionImages}
+                  onUploading={(videoId, uploading) => setUploadingVideoId(current => uploading ? videoId : current === videoId ? '' : current)} />
+                {selectedRevisionError ? <div className="inline-notice" id="revision-error" role="alert" aria-label="修订未完成">
+                  <strong>修订未完成</strong>
+                  <p>{selectedRevisionError.stage === 'preview' ? '修订预览未通过，尚未提交生成任务。' : selectedRevisionError.stage === 'submit' ? '修订提交未成功确认。' : '修订任务未完成，原版本已保留。'}</p>
+                  <p>{selectedRevisionError.message}</p>
+                  <p>修改要求已保留，请核对原因后修改或重试。</p>
+                  {selectedRevisionError.referenceError ? <Link to={`/?${productionParams}`}>检查项目人物与产品参考设置</Link> : null}
+                </div> : null}
+                {showLocalRecovery ? <div>
+                  <label className="studio-check"><input type="checkbox" checked={useProjectVideoService}
+                    disabled={Boolean(revisionJobId)} onChange={event => { setUseProjectVideoService(event.target.checked); clearRevisionPreview(); setRevisionError(null); }} />使用本项目的本地 H3 服务</label>
+                  <p className="form-hint">{cloudSource ? "此版本来自云端。勾选后，按本项目的本地 H3 配置重新生成。" : "勾选后，按本项目的本地 H3 配置重新生成。"} <Link to={`/?${productionParams}`}>查看项目视频服务与画质</Link></p>
+                </div> : null}
+                <div className="form-actions">
+                  <button className="button button-primary" type="button" onClick={() => revise()} disabled={(!instruction.trim() && !images.length) || uploadingVideoId === selected.id || busy === "revise" || !!revisionJobId}>
+                    {busy === "revise" ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
+                    基于当前版本重新生成
+                  </button>
+                </div>
+                {revisionJobId?<p role="status">{revisionJobPhase==='postprocessing'?'正在补齐修订的配音与画质，完成后可审核最终版本':revisionJobPhase==='connection_wait'?'连接暂时中断，正在等待读取原任务状态；请勿重复提交':'修订任务已提交，等待或执行参考图检查、Context-IR 编译及生成。'}</p>:null}
+                {!revisionJobId && !selectedRevisionError && lastRevision?.error_message
+                    && ['failed','cancelled','unknown'].includes(lastRevision.status)
+                  ? <p className="inline-notice" role="status">上次修订 · {lastRevision.error_message}</p> : null}
+                {recovery?.required && incompleteRevision?<div><p>{recovery.reason || '此历史修订仅保存了原片，尚未补齐原来的配音与画质。'}</p>{recovery.available?<button type="button" className="button button-secondary" disabled={Boolean(busy)||Boolean(revisionJobId)} onClick={()=>void resumeProcessing()}>恢复此修订的配音与画质</button>:null}</div>:null}
+                {recovery?.state==='ready'&&recovery.final_video_id&&recovery.final_video_id!==selectedId?<button type="button" className="button button-secondary" onClick={()=>setSelectedId(recovery.final_video_id!)}>查看配音与画质已完成版本</button>:null}
+                {shotVersions.length > 1 ? (
+                  <div className="version-comparison" aria-label="旧版与新版对比">{shotVersions.slice(0, 2).map(video => <figure key={video.id}><video controls preload="metadata" src={api.mediaUrl(video.mediaUrl || video.relativePath)} /><figcaption>v{video.revision} · {video.instruction || "原始版本"}</figcaption></figure>)}</div>
+                ) : null}
+                {shotVersions.length > 1 ? (
+                  <div className="history-strip" aria-label="版本历史">
+                    {shotVersions.map((video) => (
+                      <button type="button" key={video.id} className={video.id === selected.id ? "active" : ""} onClick={() => setSelectedId(video.id)}>
+                        <span>v{video.revision}</span><small>{formatDate(video.createdAt)}</small><Badge status={video.reviewStatus} />
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </article>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      <ConfirmDialog
+        open={approveOpen}
+        title="通过为候选成片？"
+        description="自动检查与人工审核是两套独立结果。确认后，此版本会锁为候选成片并可加入发布 dry-run 清单。"
+        confirmLabel="确认通过"
+        busy={busy === "approve"}
+        onConfirm={approve}
+        onCancel={() => setApproveOpen(false)}
+      >
+        <FormField label="审核人"><input value={approvalOperator} onChange={event => setApprovalOperator(event.target.value)} /></FormField>
+        <FormField label="通过意见"><textarea rows={3} value={approvalReason} onChange={event => setApprovalReason(event.target.value)} placeholder="记录实际观看结果及保留意见…" /></FormField>
+      </ConfirmDialog>
+      {reviewedRevision ? <div className="dialog-backdrop"><section className="dialog-card wide-dialog prompt-preview" role="dialog" aria-label="修订完整提示词">
+        <h2>修订将新建任务和视频文件</h2>
+        {reviewedRevision.input.use_project_video_service ? <p>生成服务 · 本项目的本地 H3</p> : null}
+        <p>{reviewedRevision.result.character_id ? `人物 ${reviewedRevision.result.character_id} · 版本 ${reviewedRevision.result.character_version_id ?? "未记录"}` : "此镜没有绑定人物版本"}</p>
+        {reviewedRevision.result.revision_images?.length ? <div className="reference-preview revision-reference-gallery" aria-label="即将提交的修订图片">
+          {reviewedRevision.result.revision_images.map(image => <figure key={image.id}>
+            <img src={api.mediaUrl(image.media_url)} alt={image.filename}/>
+            <figcaption>{`Picture ${image.picture_index}`} · {image.kind === 'character' ? '角色' : '道具或商品'} · {image.target_name || image.filename}</figcaption>
+          </figure>)}
+        </div> : null}
+        <pre>{reviewedRevision.result.prompt}</pre>
+        <p>系统会按参考素材重新生成，并保留旧版本。</p>
+        <div className="dialog-actions"><button className="button button-secondary" onClick={clearRevisionPreview}>返回修改</button><button className="button button-primary" disabled={busy === "revise"} onClick={() => revise(true)}>提交真实修订</button></div>
+      </section></div> : null}
+    </>
+  );
+}
+
+function QualityRow({ check }: { check: QualityCheck }) {
+  const details = check.details ?? check.details_json ?? {};
+  const label = (check.checkType ?? check.check_type ?? "检查项").replaceAll("_", " ");
+  return (
+    <div className="quality-row">
+      <span className={`quality-icon ${check.status}`} aria-hidden="true">
+        {check.status === "passed" || check.status === "approved" ? <Check size={15} /> : check.status === "not_available" ? <RotateCcw size={15} /> : <CircleAlert size={15} />}
+      </span>
+      <div><strong>{label}</strong><small>{String(details.message ?? details.reason ?? (check.score != null ? `评分 ${check.score}` : statusLabel(check.status)))}</small></div>
+      <Badge status={check.status} />
+    </div>
+  );
+}
