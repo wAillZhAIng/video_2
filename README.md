@@ -11,7 +11,7 @@
 从本仓库 **Code → Download ZIP** 解压，进入包含 `compose.yaml` 的目录。也可用 Git：
 
 ```bash
-git clone https://github.com/wAillZhAIng/AI_Video_automation.git video-factory
+git clone https://github.com/wAillZhAIng/video_2.git video-factory
 cd video-factory
 docker compose up -d
 ```
