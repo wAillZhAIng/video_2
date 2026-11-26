@@ -333,22 +333,13 @@ export function StudioPage() {
           })}>重试成片</button> : null}
           {previousExports.length ? <details className="workspace-details"><summary>历史成片</summary><ul>{previousExports.map(render => <li key={render.id}><a href={api.mediaDownloadUrl(render.relative_path)} download>{recordText(render.snapshot_json?.assembly_name) || '成片'} · {render.created_at ? new Date(render.created_at).toLocaleString() : render.id}</a></li>)}</ul></details> : null}
         </section>
-        <div className="studio-output-subheading"><h3>逐镜输出</h3></div>
+        <div className="studio-output-subheading"><h3>分镜处理状态</h3></div>
         {shots.length ? <div className="studio-shot-table">{shots.map(shot => {
-          const relativePath = typeof shot.video?.relative_path === 'string' ? shot.video.relative_path : '';
-          const videoUrl = relativePath ? api.mediaUrl(relativePath) : '';
-          const downloadName = relativePath.split('/').pop() || `shot-${shot.order}.mp4`;
           return <article key={shot.id}>
             <strong>#{shot.order} · {shot.title || shot.scene_name}</strong>
             <span>{shot.scene_name} · {shot.cast?.map(person => person.name).join('、') || '未关联人物'}</span>
             <span>{shotTime(studioVideoDuration(shot.video) || shot.duration_seconds)}</span>
             <StudioStatus status={shot.status}/>
-            <div className="studio-shot-output">
-              {videoUrl ? <>
-                <video className="studio-shot-preview" src={videoUrl} controls playsInline preload="metadata" aria-label={`第 ${shot.order} 镜视频预览`}/>
-                <a className="button button-secondary button-small" href={api.mediaDownloadUrl(relativePath)} download={downloadName}><Download size={14}/>下载本镜</a>
-              </> : <Link to={`/storyboard?project=${encodeURIComponent(projectId)}&shot=${encodeURIComponent(shot.id)}`}>查看分镜</Link>}
-            </div>
           </article>;
         })}</div> : <EmptyState title="还没有分镜" description="上传包含场景与人物动作的 Word 剧本，自动建立分镜和关联。"/>}
       </section>
