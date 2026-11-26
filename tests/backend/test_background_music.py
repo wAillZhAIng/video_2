@@ -69,16 +69,15 @@ def test_standalone_music_table_does_not_create_additional_shots():
     ]
 
 
-def test_background_music_checks_configured_context_queue_instead_of_legacy_port(settings, monkeypatch):
-    app_settings = replace(settings, comfyui_base_url='http://127.0.0.1:18188',
-                           h3_context_comfyui_url='http://127.0.0.1:8188')
+def test_background_music_checks_configured_direct_comfy_queues(settings, monkeypatch):
+    app_settings = replace(settings, comfyui_base_url='http://127.0.0.1:18188')
     engine = build_engine(settings.database_url)
     Base.metadata.create_all(engine)
     from app.models import AIService
 
     with Session(engine) as session:
-        session.add(AIService(module='video_generation', provider='comfyui', name='Context-IR',
-                              base_url='http://127.0.0.1:8788', settings_json={'h3_context_ir': True}))
+        session.add(AIService(module='video_generation', provider='comfyui', name='Native H3',
+                              base_url='http://127.0.0.1:18189', settings_json={'workflow_profile': 'native_h3_ref2va'}))
         session.flush()
         peers = background_music._configured_gpu_peers(session, app_settings)
     origins = []
@@ -91,7 +90,7 @@ def test_background_music_checks_configured_context_queue_instead_of_legacy_port
     monkeypatch.setattr(background_music, '_json', queue)
     assert asyncio.run(background_music._idle(
         app_settings, {'base_url': 'http://127.0.0.1:18188', 'gpu_peer_origins': peers}))
-    assert origins == ['http://127.0.0.1:18188', 'http://127.0.0.1:8788']
+    assert origins == ['http://127.0.0.1:18188', 'http://127.0.0.1:18189']
 
 
 def test_arrangement_keeps_one_track_and_only_changes_explicit_ranges(settings):

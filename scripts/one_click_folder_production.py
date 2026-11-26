@@ -207,10 +207,10 @@ def quality_for_candidate(candidate: Candidate, *, resolution: str, mode: str, p
     return {"resolution": resolution, "mode": mode, "processing": processing,
         "aspect_ratio": resolve_aspect_ratio(candidate.text, requested_aspect_ratio)}
 
-def context_native_canvas(aspect_ratio: str, megapixels: float = 0.59) -> tuple[int, int]:
-    """Match the H3 Context-IR 32-pixel grid at the selected portrait/landscape ratio."""
+def native_h3_canvas(aspect_ratio: str, megapixels: float = 0.59) -> tuple[int, int]:
+    """Match the native H3 32-pixel grid at the selected portrait/landscape ratio."""
     if aspect_ratio not in SUPPORTED_ASPECT_RATIOS:
-        raise WorkflowError(f"Context-IR 不支持画幅 {aspect_ratio}", phase="quality")
+        raise WorkflowError(f"MiniMax H3 不支持画幅 {aspect_ratio}", phase="quality")
     width_ratio, height_ratio = (int(part) for part in aspect_ratio.split(":"))
     ratio = width_ratio / height_ratio
     pixels = round(megapixels * 1_000_000, 2)
@@ -376,20 +376,20 @@ def quality_supported(api: Api, quality: dict[str, str]) -> tuple[bool, dict[str
     return False, {"supported": False, "reason": f"服务未返回 {label} 的 {resolution} · {ratio} 验收能力", "capability_count": len(plans)}
 
 def generation_supported(api: Api, quality: dict[str, str]) -> tuple[bool, dict[str, Any]]:
-    """Require the active local Context-IR route and the requested sampler mapping."""
-    health = api.get("/api/providers/h3/context-health")
+    """Require the direct native H3 route and the requested sampler mapping."""
+    health = api.get("/api/providers/h3/health")
     expected_steps = {"preview": 12, "standard": 20, "fast": 4, "high": 30}.get(quality.get("mode"))
     capabilities = api.get("/api/quality/capabilities")
     mode = capabilities.get("modes", {}).get(quality.get("mode"), {}) if isinstance(capabilities, dict) else {}
     steps = mode.get("steps") if isinstance(mode, dict) else None
     result = {"health": health, "mode": quality.get("mode"), "steps": steps,
-              "expected_steps": expected_steps, "workflow_route": "local Context-IR"}
-    ready = (isinstance(health, dict) and health.get("provider") == "comfyui_h3_context_ir"
+               "expected_steps": expected_steps, "workflow_route": "native MiniMax H3 Ref2VA"}
+    ready = (isinstance(health, dict) and health.get("provider") == "comfyui_h3"
         and health.get("mode") == "real" and health.get("ready") is True
         and health.get("reference_to_video_available") is True
         and expected_steps is not None and steps == expected_steps)
     if not ready:
-        result["reason"] = "本机 Context-IR 视频路由未就绪，或画质档位没有匹配的采样步数映射"
+        result["reason"] = "本机 MiniMax H3 原生视频路由未就绪，或画质档位没有匹配的采样步数映射"
     return ready, result
 
 def product_lookup(api: Api, name: str, brand: str) -> list[dict[str, Any]]:
@@ -447,10 +447,10 @@ def dry_run_plan(candidate: Candidate, api: Api | None, quality: dict[str, str],
         ready, evidence = generation_supported(api, quality)
         result["generation_preflight"] = {"ready": ready, "evidence": evidence}
         if not ready:
-            result.setdefault("blockers", []).append("本机 Context-IR/H3 工作流未就绪，未创建项目或提交模型")
+            result.setdefault("blockers", []).append("本机 MiniMax H3 原生工作流未就绪，未创建项目或提交模型")
     except WorkflowError as exc:
         result["generation_preflight"] = {"ready": False, "error": str(exc)}
-        result.setdefault("blockers", []).append("无法核验本机 Context-IR/H3 工作流，未创建项目或提交模型")
+        result.setdefault("blockers", []).append("无法核验本机 MiniMax H3 原生工作流，未创建项目或提交模型")
     try:
         supported, evidence = quality_supported(api, quality); result["quality_preflight"] = {"supported": supported, "evidence": evidence}
         if not supported: result.setdefault("blockers", []).append("本机超分处理方式、画幅和分辨率尚无匹配验收能力；真实提交前阻断，不创建项目或任务")
@@ -496,10 +496,11 @@ def ensure_product(api: Api, candidate: Candidate, *, product_name: str, brand: 
     return product, image_ids
 
 def identity_reference_image_ids(product: dict[str, Any], image_ids: list[str]) -> list[str]:
-    """Preserve every explicitly selected product view for Context-IR analysis.
+    """Preserve every explicitly selected product view for native H3 input.
 
-    The cover remains the first anchor; close-ups and operators are separated
-    by the real per-image analyser and identity gate, never hidden by this UI.
+    The cover remains the first anchor.  The selected IDs are passed in their
+    stable order; native H3 receives the images directly rather than a separate
+    image-analysis or semantic-compiler stage.
     """
     selected = list(dict.fromkeys(image_ids))
     cover = product.get("cover_image_id")
@@ -558,7 +559,7 @@ def submit_candidate(api: Api, candidate: Candidate, *, quality: dict[str, str],
         details={"image_count": len(candidate.images), "maximum": 8})
     ready, generation = generation_supported(api, quality)
     if not ready:
-        raise WorkflowError("本机 Context-IR/H3 工作流未就绪，未导入 Word 或提交模型", phase="preflight", details=generation)
+        raise WorkflowError("本机 MiniMax H3 原生工作流未就绪，未导入 Word 或提交模型", phase="preflight", details=generation)
     supported, capability = quality_supported(api, quality)
     if not supported: raise WorkflowError("所选本机画质处理规格未验证，未导入 Word 或提交模型", phase="preflight", details=capability)
     if candidate.product_match and not candidate.images: raise WorkflowError("脚本匹配产品但无有效同目录产品图，未导入或提交", phase="preflight")
@@ -608,7 +609,7 @@ def submit_candidate(api: Api, candidate: Candidate, *, quality: dict[str, str],
         if progress: progress(outcome.get("status", "existing_run_preserved"),
                               {"project_id": project_id, "run": old_run, "existing_run_preserved": True})
         return outcome
-    width, height = context_native_canvas(quality["aspect_ratio"])
+    width, height = native_h3_canvas(quality["aspect_ratio"])
     payload = {"quality": quality, "width": width, "height": height, "automatic_draft_assembly": False,
         "automatic_final_assembly": True, "allow_cloud_costs": False, "allow_paid_fallback": False}
     if product_plan: payload["product_reference_plan"] = product_plan

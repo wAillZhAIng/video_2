@@ -12,9 +12,8 @@ const mocked = vi.mocked(request);
 afterEach(() => { cleanup(); mocked.mockReset(); });
 
 const deployment = { container: true, defaults: { comfyui: 'http://host.docker.internal:8189',
-  local_llm: 'http://host.docker.internal:1234/v1', context_ir: 'http://host.docker.internal:8788' },
-  video_workflows: [{ id: 'context_ir', label: 'Context-IR 三档：Fast 4 / Quality 20 / Quality 30' },
-    { id: 'native_h3_r2v', label: '原生 H3 参考图工作流（20步）' }] };
+  local_llm: 'http://host.docker.internal:1234/v1' },
+  video_workflows: [{ id: 'native_h3_ref2va', label: 'MiniMax H3 原生 Ref2VA：Fast 4 / Standard 20 / High 30' }] };
 
 it('uses the host gateway, saves explicit origin trust, and offers bundled workflows without host paths', async () => {
   mocked.mockImplementation(async (url, init) => {
@@ -28,28 +27,28 @@ it('uses the host gateway, saves explicit origin trust, and offers bundled workf
   await user.click(screen.getByRole('button', { name: '添加服务' }));
   const dialog = within(screen.getByRole('dialog', { name: '配置 AI 服务' }));
   await user.selectOptions(dialog.getByLabelText('服务用途'), 'video_generation');
-  expect(dialog.getByLabelText('服务地址 base_url')).toHaveValue('http://host.docker.internal:8788');
-  expect(dialog.getByLabelText('内置视频工作流')).toHaveValue('context_ir');
+  expect(dialog.getByLabelText('服务地址 base_url')).toHaveValue('http://host.docker.internal:8189');
+  expect(dialog.getByLabelText('内置视频工作流')).toHaveValue('native_h3_ref2va');
   expect(dialog.queryByLabelText('本地 R2V 工作流路径')).toBeNull();
   await user.type(dialog.getByLabelText('服务名称'), '我的本地视频节点');
   await user.click(dialog.getByLabelText('确认这是我管理的本地模型服务'));
   const address = dialog.getByLabelText('服务地址 base_url');
   await user.clear(address);
-  await user.type(address, 'http://192.168.1.20:8788');
+  await user.type(address, 'http://192.168.1.20:8189');
   expect(dialog.getByLabelText('确认这是我管理的本地模型服务')).not.toBeChecked();
   await user.click(dialog.getByLabelText('确认这是我管理的本地模型服务'));
   await user.click(dialog.getByRole('button', { name: '保存配置' }));
   const saved = mocked.mock.calls.find(([, init]) => init?.method === 'POST')!;
   expect(JSON.parse(String(saved[1]?.body))).toMatchObject({ provider: 'comfyui', module: 'video_generation',
-    base_url: 'http://192.168.1.20:8788', settings: { workflow_profile: 'context_ir', h3_context_ir: true,
-      local_service_origin: 'http://192.168.1.20:8788' } });
+    base_url: 'http://192.168.1.20:8189', settings: { workflow_profile: 'native_h3_ref2va',
+      local_service_origin: 'http://192.168.1.20:8189' } });
 });
 
 it('shows reachable but incomplete native model checks in the simplified settings', async () => {
   mocked.mockImplementation(async url => {
     if (url === '/api/settings/ai-service-options') return deployment;
     if (url === '/api/settings/ai-services') return [{ id: 'node', name: '本地视频节点', module: 'video_generation',
-      provider: 'comfyui', default_model: 'minimax_h3_w6a8', base_url: deployment.defaults.context_ir,
+      provider: 'comfyui', default_model: 'minimax_h3_w6a8', base_url: deployment.defaults.comfyui,
       enabled: true, models: [], settings: {}, capabilities: {}, last_test: { status: 'reachable',
         error: '本地推理节点尚未就绪', runtime: { checks: [{ name: 'H3模型', ok: false, detail: '缺少指定权重' }] } } }];
     throw new Error(url);

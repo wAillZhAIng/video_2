@@ -6,7 +6,10 @@ from dataclasses import replace
 import pytest
 
 from app.core.errors import AppError
-from app.services.providers import ComfyUIH3Provider, apply_sampling_steps, validate_sampling_contract
+from app.services import providers
+from app.services.providers import (ComfyUIH3Provider, apply_sampling_steps,
+    freeze_native_ref2va_workflow, native_ref2va_workflow_path,
+    native_video_reference_schema_errors, validate_sampling_contract)
 
 
 def sampling_graph():
@@ -158,3 +161,68 @@ def test_health_loader_rejects_invalid_recipe_before_any_provider_request(settin
     with pytest.raises(AppError) as error:
         provider._load_workflow()
     assert error.value.code == 'h3_sampling_contract_invalid'
+
+
+@pytest.mark.parametrize(('steps', 'workflow_name'), [
+    (4, 'h3-ref2va-native-fast4-v2'),
+    (20, 'h3-ref2va-native-quality20-v2'),
+    (30, 'h3-ref2va-native-quality30-v2'),
+])
+def test_native_ref2va_tiers_use_separate_pinned_workflows(steps, workflow_name):
+    path = native_ref2va_workflow_path({'steps': steps})
+    payload = json.loads(path.read_text(encoding='utf-8'))
+    metadata = payload['_video_factory']
+    assert metadata['name'] == workflow_name
+    assert validate_sampling_contract(payload['prompt'], metadata) == steps
+
+
+def test_native_ref2va_rejects_unsupported_step_count_without_fast_fallback():
+    with pytest.raises(AppError) as error:
+        native_ref2va_workflow_path({'steps': 12})
+    assert error.value.code == 'native_ref2va_quality_invalid'
+
+
+def test_provider_submit_loader_uses_requested_native_tier(settings):
+    provider = ComfyUIH3Provider(settings)
+    _prompt, metadata = provider._load_workflow({'steps': 30})
+    assert metadata['name'] == 'h3-ref2va-native-quality30-v2'
+
+
+def test_frozen_native_workflow_is_used_without_reloading_the_source_file(monkeypatch):
+    frozen = freeze_native_ref2va_workflow({'steps': 20})
+    monkeypatch.setattr(providers, 'native_ref2va_workflow_path',
+                        lambda *_args, **_kwargs: pytest.fail('frozen task must not reload a source graph'))
+    prompt, metadata = ComfyUIH3Provider(object())._load_workflow({
+        'steps': 20, 'native_ref2va_workflow': frozen,
+    })
+    assert metadata['name'] == 'h3-ref2va-native-quality20-v2'
+    assert prompt['124']['inputs']['steps'] == 20
+
+
+def test_frozen_native_workflow_rejects_content_or_tier_tampering():
+    frozen = freeze_native_ref2va_workflow({'steps': 4})
+    tampered = copy.deepcopy(frozen)
+    tampered['document']['prompt']['123']['inputs']['sampler_name'] = 'res_multistep'
+    with pytest.raises(AppError) as changed:
+        ComfyUIH3Provider(object())._load_workflow({'steps': 4, 'native_ref2va_workflow': tampered})
+    assert changed.value.code == 'native_ref2va_workflow_snapshot_changed'
+    with pytest.raises(AppError) as tier:
+        ComfyUIH3Provider(object())._load_workflow({'steps': 20, 'native_ref2va_workflow': frozen})
+    assert tier.value.code == 'native_ref2va_workflow_snapshot_mismatch'
+
+
+def test_video_reference_schema_requires_real_multiframe_nodes():
+    nodes = {
+        'LoadVideo': {'output': ['VIDEO'], 'input': {'required': {'file': ['STRING']}}},
+        'GetVideoComponents': {'output': ['IMAGE', 'AUDIO'], 'input': {'required': {'video': ['VIDEO']}}},
+        'MiniMaxH3ReferenceToVideo': {'input': {'optional': {
+            'ref_videos': ['COMFY_AUTOGROW_V3', {'template': {'prefix': 'ref_video_', 'max': 3,
+                'input': {'required': {'ref_video': ['IMAGE']}}}}],
+            'ref_video_audios': ['COMFY_AUTOGROW_V3', {'template': {'prefix': 'ref_video_audio_', 'max': 3,
+                'input': {'required': {'ref_video_audio': ['AUDIO']}}}}],
+        }}},
+    }
+    assert native_video_reference_schema_errors(nodes, reference_count=3) == []
+    assert native_video_reference_schema_errors(nodes, reference_count=3, include_audio=True) == []
+    nodes['GetVideoComponents']['output'][0] = 'LATENT'
+    assert native_video_reference_schema_errors(nodes)

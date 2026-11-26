@@ -233,19 +233,19 @@ def test_default_profile_keeps_existing_decoding_unchanged(server,format_value):
 
 
 @pytest.mark.parametrize('format_value',[{'type':'json_schema','json_schema':{}},{'type':'json_object'}])
-def test_guided_json_bypasses_h3ir_prose_controls_before_transformers_import(server,monkeypatch,format_value):
-    monkeypatch.setattr(server,'H3IR_PROSE_REPEAT_GUARD',True)
+def test_guided_json_bypasses_screenplay_prose_controls_before_transformers_import(server,monkeypatch,format_value):
+    monkeypatch.setattr(server,'SCREENPLAY_PROSE_REPEAT_GUARD',True)
     kwargs,receipt,guard=server.generation_prose_controls(request(server,response_format=format_value),object(),4)
     assert kwargs=={} and guard is None
     assert receipt['enabled'] is False
 
 
-def test_active_h3ir_profile_adds_output_only_processors_without_changing_stop_controls(server,monkeypatch):
+def test_active_screenplay_prose_profile_adds_output_only_processors_without_changing_stop_controls(server,monkeypatch):
     fake=ModuleType('transformers')
     fake.LogitsProcessorList=list;fake.StoppingCriteriaList=list
     fake.RepetitionPenaltyLogitsProcessor=Penalty
     monkeypatch.setitem(sys.modules,'transformers',fake)
-    monkeypatch.setattr(server,'H3IR_PROSE_REPEAT_GUARD',True)
+    monkeypatch.setattr(server,'SCREENPLAY_PROSE_REPEAT_GUARD',True)
     model=SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=[9,10]))
     body=request(server,stop=['END'])
     stop_kwargs,stops=server.generation_stop_controls(body,SimpleNamespace(tokenizer=object()))
@@ -273,19 +273,8 @@ def test_repetition_termination_can_never_be_reported_as_success(server):
     assert server.generation_finish_reason(True,'END',300,4096,guard)=='repetition_limit'
 
 
-def test_h3ir_wrapper_enables_policy_but_base_screenplay_does_not(server,tmp_path):
-    assert server.H3IR_PROSE_REPEAT_GUARD is False
-    name='_qwen_repeat_profile_'+uuid.uuid4().hex
-    spec=importlib.util.spec_from_file_location(name,SCRIPTS/'serve_h3ir_qwen4b.py')
-    wrapper=importlib.util.module_from_spec(spec)
-    old_bytecode=sys.dont_write_bytecode
-    try:
-        with patch.dict(sys.modules),patch.dict(os.environ,{'VF_RUNTIME_ROOT':str(tmp_path),'VF_QWEN_MODEL':str(tmp_path/'no-weights')}):
-            sys.modules[name]=wrapper;spec.loader.exec_module(wrapper)
-            assert wrapper.runtime.H3IR_PROSE_REPEAT_GUARD is True
-            assert wrapper.runtime.PROSE_OUTPUT_REPETITION_PENALTY==1.1
-    finally:sys.dont_write_bytecode=old_bytecode
-    assert server.H3IR_PROSE_REPEAT_GUARD is False
+def test_base_screenplay_keeps_the_optional_prose_guard_disabled(server):
+    assert server.SCREENPLAY_PROSE_REPEAT_GUARD is False
 
 
 def test_actual_transformers_cpu_processor_preserves_prompt_and_eos(server):

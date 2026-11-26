@@ -49,8 +49,7 @@ def _native_h3_video_route(snapshot, shot_id):
     service = ((route.get('selected') or {}).get('service_snapshot') if route else None)
     profile = (service or {}).get('settings') or {}
     return ((service or {}).get('provider') == 'comfyui'
-            and profile.get('workflow_profile') == 'native_h3_r2v'
-            and profile.get('h3_context_ir') is not True)
+            and profile.get('workflow_profile') == 'native_h3_ref2va')
 
 
 def _quality_route(session, settings, project_id, shot_id, quality, options):
@@ -171,24 +170,17 @@ def apply_saved_quality(session, settings, project_id, expected_profile_revision
         quality_service.inherited_settings(session, project_id) or {}).model_dump()
     snapshot = copy.deepcopy(run.snapshot_json)
     options = snapshot.setdefault('options', {})
-    context_ids = set(snapshot.get('h3_context_by_shot', {})) & set(snapshot.get('shot_ids', []))
-    legacy_ids = set(snapshot.get('shot_ids', [])) - context_ids
-    context_quality = {}
-    if context_ids:
-        for shot_id in context_ids:
-            frozen = options.get('quality_by_shot', {}).get(shot_id)
-            override = quality_service.find_profile(session, 'shot', shot_id)
-            requested = QualitySettings.model_validate(override.settings_json if override else project_settings)
-            if not frozen or requested.mode != QualitySettings.model_validate(frozen).mode:
-                raise AppError(409, 'quality_apply_context_mode_frozen',
-                               '本轮 Context-IR 制作已锁定工作流与采样步数。已保存的画质模式将在新建制作时生效。',
-                               {'run_id': run.id, 'shot_id': shot_id})
-            context_quality[shot_id] = requested
-    for shot_id in legacy_ids:
+    frozen_generation_ids = set(snapshot.get('shot_ids', []))
+    for shot_id in frozen_generation_ids:
         override = quality_service.find_profile(session, 'shot', shot_id)
         requested = QualitySettings.model_validate(override.settings_json if override else project_settings)
+        frozen = options.get('quality_by_shot', {}).get(shot_id)
+        if frozen and requested.mode != QualitySettings.model_validate(frozen).mode:
+            raise AppError(409, 'quality_apply_generation_mode_frozen',
+                           '已创建的原生视频任务已锁定采样工作流与步数；已保存的新模式会在新制作中生效。',
+                           {'run_id': run.id, 'shot_id': shot_id})
         if requested.mode == 'fast' and not _native_h3_video_route(snapshot, shot_id):
-            raise AppError(409, 'quality_apply_legacy_fast_requires_new_run',
+            raise AppError(409, 'quality_apply_fast_requires_native_run',
                            'Fast 需要已冻结的原生 H3 4-step 路由；已保存此设置，请为该工作流新建制作。',
                            {'run_id': run.id, 'shot_id': shot_id})
     nodes = copy.deepcopy(run.nodes_json or [])
@@ -229,12 +221,9 @@ def apply_saved_quality(session, settings, project_id, expected_profile_revision
                    for n in nodes):
                 raise AppError(409, 'quality_apply_media_busy',
                                '本镜配音混合或口型任务尚在处理，保留其输入和画质快照')
-            if shot_id in context_quality:
-                new_quality = context_quality[shot_id]
-            else:
-                override = quality_service.find_profile(session, 'shot', shot_id)
-                new_quality = QualitySettings.model_validate(
-                    override.settings_json if override else project_settings)
+            override = quality_service.find_profile(session, 'shot', shot_id)
+            new_quality = QualitySettings.model_validate(
+                override.settings_json if override else project_settings)
             if new_quality.aspect_ratio != shot.aspect_ratio:
                 raise AppError(409, 'quality_apply_aspect_mismatch',
                                '保存的画质画幅与本镜不一致，请明确保存正确画幅，未拉伸或裁切')
@@ -297,7 +286,7 @@ def apply_saved_quality(session, settings, project_id, expected_profile_revision
         changes.append({'shot_id': shot.id, 'source_video_id': proposal['source'].id,
                         'previous': previous, 'settings': proposal['quality'], 'route': route})
     if proposals:
-        if legacy_ids:
+        if frozen_generation_ids:
             options['quality'] = project_settings
         values = {'snapshot_json': snapshot, 'nodes_json': nodes,
                   'status': 'running' if run.status == 'completed_with_errors' else run.status,

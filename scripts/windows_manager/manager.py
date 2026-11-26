@@ -28,7 +28,6 @@ AUTHOR_SCRIPT = ROOT / "scripts/serve_screenplay_qwen.py"
 ASR_SCRIPT = ROOT / "scripts/serve_speech_recognition.py"
 ASR_PYTHON = ROOT / ".local-runtime/asr-env/Scripts/python.exe"
 ASR_MODEL = Path("E:/Models/faster-whisper-large-v3")
-CONTEXT_SCRIPT = ROOT / "scripts/local_inference/bundle/serve_h3ir_qwen4b.py"
 SEEDVR_RELAY = ROOT / "scripts/local_inference/share_comfy_with_seedvr.py"
 VITE_SCRIPT = ROOT / "frontend/node_modules/vite/bin/vite.js"
 JOB_SCRIPTS = tuple(
@@ -43,13 +42,11 @@ PORTS = {
     "剧本 Qwen": 8771,
     "语音识别": 8778,
     "ComfyUI": 8188,
-    "H3 服务": 8788,
-    "Context-IR Qwen": 8772,
     "SeedVR2 共用端口": 8189,
 }
 STOP_ORDER = (
-    ("后端",), ("H3 服务",),
-    ("剧本 Qwen", "语音识别", "SeedVR2 共用端口", "ComfyUI", "Context-IR Qwen", "辅助制作进程", "网页"),
+    ("后端",),
+    ("剧本 Qwen", "语音识别", "SeedVR2 共用端口", "ComfyUI", "辅助制作进程", "网页"),
 )
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -159,15 +156,10 @@ def role_of(process):
                 if (same_path(option(options, "--input-directory"), INFERENCE / "input", process)
                         and same_path(option(options, "--output-directory"), INFERENCE / "output", process)):
                     return "ComfyUI"
-            if same_path(script, NATIVE_SCRIPT, process) and options[:1] == ["serve"]:
-                if same_path(option(options, "--config"), CONFIG, process):
-                    return "H3 服务"
             if same_path(script, AUTHOR_SCRIPT, process):
                 return "剧本 Qwen"
             if same_path(script, ASR_SCRIPT, process) and same_path(option(options, "--model-dir"), ASR_MODEL, process):
                 return "语音识别"
-            if same_path(script, CONTEXT_SCRIPT, process):
-                return "Context-IR Qwen"
             if same_path(script, SEEDVR_RELAY, process):
                 return "SeedVR2 共用端口"
             if any(same_path(script, job_script, process) for job_script in JOB_SCRIPTS):
@@ -302,8 +294,7 @@ def start():
         "output_root": INFERENCE / "output",
     }
     if (any(Path(config[key]).resolve() != path for key, path in expected_paths.items())
-            or config["comfy_origin"].rstrip("/") != f"http://127.0.0.1:{PORTS['ComfyUI']}"
-            or config["listen"] != "127.0.0.1" or config["port"] != PORTS["H3 服务"]):
+            or config["comfy_origin"].rstrip("/") != f"http://127.0.0.1:{PORTS['ComfyUI']}"):
         raise ManagerError(f"本机模型路径或端口与本项目管理配置不一致：{CONFIG}")
     for name in ("input", "output", "jobs", "logs", "tmp", "user"):
         checked_workspace_path(INFERENCE / name).mkdir(parents=True, exist_ok=True)
@@ -315,10 +306,10 @@ def start():
             and Path(health.get("workspace") or "").resolve() == ROOT
         )
 
-    # Port 8771 is the authoring model; the native supervisor owns the Context-IR model.
+    # The authoring model is optional and independent from direct native H3 video generation.
     author_python = Path("E:/VideoFactoryRuntime/envs/screenplay_qwen/Scripts/python.exe")
     if not author_python.is_file():
-        author_python = Path(config["qwen_python"])
+        author_python = ROOT / ".venv/Scripts/python.exe"
     ensure_service(
         "剧本 Qwen", author_healthy, 55,
         lambda: launch("剧本 Qwen", [
@@ -329,31 +320,8 @@ def start():
     def comfy_healthy():
         return isinstance(response_fields(request("ComfyUI", "/system_stats")).get("devices"), list)
 
-    port_is_owned("Context-IR Qwen")
     ensure_service("ComfyUI", comfy_healthy, 90, lambda: native.start_comfy(config))
-
-    def h3_healthy():
-        health = response_fields(request("H3 服务", "/video_factory/runtime"))
-        if health.get("service") != "video-factory-native-context-runtime-v1":
-            return False
-        if health.get("ready") and port_is_owned("Context-IR Qwen"):
-            return True
-        # The supervisor may release Qwen temporarily while a real H3 job uses the GPU.
-        comfy = response_fields(health.get("comfyui"))
-        return (
-            health.get("busy") and health.get("watcher_running")
-            and response_fields(health.get("source_baseline")).get("ok")
-            and (bool(health.get("active_prompts")) or bool(comfy.get("queue_running")))
-        )
-
-    ensure_service(
-        "H3 服务", h3_healthy, 120,
-        lambda: launch("H3 服务", [
-            required_file(Path(config["comfy_python"]), "H3 Python 环境"),
-            "-X", "utf8", "-B", NATIVE_SCRIPT, "serve", "--config", CONFIG,
-        ]),
-    )
-    report("网页、后端、ComfyUI 和 Context-IR 已就绪。")
+    report("网页、后端和原生 MiniMax H3 ComfyUI 已就绪。")
     print("VF_OPEN_BROWSER", flush=True)
     try:
         def shared_comfy_healthy():
@@ -460,11 +428,11 @@ def reset_caches_and_data(database, media):
         ROOT / "frontend/node_modules/.vite", ROOT / "frontend/node_modules/.vite-temp",
         ROOT / ".local-runtime/comfy/input", ROOT / ".local-runtime/comfy/output",
         ROOT / ".local-runtime/comfy/temp",
-        *(INFERENCE / name for name in ("input", "output", "jobs", "logs", "tmp", "cache/h3ir")),
+        *(INFERENCE / name for name in ("input", "output", "jobs", "logs", "tmp", "cache/native_h3")),
         MANAGER / "logs",
     ]
     transient_files = [
-        *(INFERENCE / name for name in ("comfy-owned-process.json", "qwen-owned-process.json", "preflight.log")),
+        *(INFERENCE / name for name in ("comfy-owned-process.json", "preflight.log")),
         MANAGER / "controller.log",
     ]
     for path in (*runtime_directories, *transient_files):

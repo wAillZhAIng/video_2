@@ -94,7 +94,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   let modeLabel = "正在检测本地 H3";
   if (backend === "unreachable") modeLabel = "后端未连接";
   else if (mode === "demo") modeLabel = "DEMO 模式";
-  else if (health?.connected === true && health.busy === true) modeLabel = health.busy_reason === "qwen" ? "本地 Qwen 处理中" : "本地 H3 队列处理中";
+  else if (health?.connected === true && health.busy === true) modeLabel = "本地 H3 队列处理中";
   else if (mode === "real") modeLabel = "ComfyUI 已连接";
   else if (health?.connected === false) modeLabel = "本地 H3 未连接";
   else if (health?.ready === false) modeLabel = "本地模型未就绪";
@@ -173,7 +173,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="app-content">
         <header className="topbar">
           <div className="topbar-spacer" />
-          <button className="provider-control" type="button" onClick={refreshHealth} aria-label="刷新本地模型连接状态" title={health?.error || "本地 Context-IR 制作状态"}>
+          <button className="provider-control" type="button" onClick={refreshHealth} aria-label="刷新本地模型连接状态" title={health?.error || "本地 MiniMax H3 制作状态"}>
             <span className={`live-dot ${mode}${backend === "unreachable" ? " error" : ""}`} aria-hidden="true" />
             <Badge tone={mode === "real" ? "success" : mode === "demo" ? "demo" : "neutral"}>{modeLabel}</Badge>
           </button>

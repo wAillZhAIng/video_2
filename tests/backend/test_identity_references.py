@@ -85,6 +85,15 @@ def test_provider_replaces_extra_template_slots_in_exact_numeric_order():
     assert len(paths)==2 and metadata['reference_tags']==['<Picture 1>','<Picture 2>']
 
 
+def test_provider_allows_native_text_or_video_only_generation_without_picture_slots():
+    graph={'base':{'class_type':'LoadImage','inputs':{'image':'unused'}},
+           'r2v':{'class_type':'MiniMaxH3ReferenceToVideo','inputs':{'ref_images.ref_image_0':['base',0]}}}
+    metadata={'reference_paths':[['base','inputs','image']]}
+    assert bind_ordered_reference_slots(graph,metadata,[])==[]
+    assert not any(key.startswith('ref_images.') for key in graph['r2v']['inputs'])
+    assert metadata['reference_tags']==[]
+
+
 def test_handoff_constraints_allow_receiver_contact_without_object_duplication():
     context={'production':{'prop_states':[{'entity_id':'notebook_version','prop_key':'NOTEBOOK','holder':'giver','hand':'right'}],
         'beats':[{'character_id':'giver','action':'passes notebook to receiver','contact_target':'receiver'}]},

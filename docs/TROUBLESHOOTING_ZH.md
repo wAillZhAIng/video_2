@@ -23,7 +23,7 @@ docker compose exec backend python -m app.container_entrypoint doctor
 | 无法连接 Docker 引擎 | 打开 Docker Desktop 并等待引擎运行；Windows 检查 WSL 2、虚拟化与 Linux 容器模式 |
 | 提示找不到 Compose 文件 | 当前目录应能看见 `compose.yaml`，不要在 ZIP 中直接运行，先完整解压 |
 | 镜像引用为空或自定义地址错误 | 默认 Compose 构建当前源码，检查 `BACKEND_SOURCE_IMAGE`/`FRONTEND_SOURCE_IMAGE` 是否被自己的配置覆盖。只有 `compose.prebuilt.yaml` 拉取 GHCR；核对真实发布标签，不自行猜测版本 |
-| 修改源码后仍像旧版 | 确认当前目录、Compose 文件和网页端口，再运行默认 `docker compose up -d`；旧 `compose.prebuilt.yaml` 镜像可能不含 Context-IR。不要把旧镜像降级到新版数据库 |
+| 修改源码后仍像旧版 | 确认当前目录、Compose 文件和网页端口，再运行默认 `docker compose up -d`；旧 `compose.prebuilt.yaml` 镜像可能不含当前原生 H3 Ref2VA 更新。不要把旧镜像降级到新版数据库 |
 | GHCR 403、denied、unauthorized | 确认实际镜像地址和标签。公开发行镜像应可匿名拉取，维护者需检查 Package 可见性与仓库关联，不能把每个用户申请私人 Token 当作正式安装步骤 |
 | 下载超时、DNS 或 TLS 错误 | 检查 Docker Desktop 网络/代理、企业证书和磁盘空间；按官方配置代理，保留 TLS 校验，不把密钥改写进 URL |
 | `no matching manifest` | 检查 Docker 架构和发布镜像清单。Apple Silicon 需要 ARM64；报告缺失的架构，不直接强制 AMD64 并宣称跨平台完成 |
@@ -65,9 +65,9 @@ docker context show
 
 ## 模型服务配置与云端 API
 
-**电脑重启后，网页已打开，但 Context-IR 自动制作反复连接失败。** 网页服务就绪与模型服务就绪分别检查。自动编排会在上传参考素材、创建视频任务前，只读核对 ComfyUI 队列、当前工作流所需节点与辅助模型服务：ComfyUI 冷启动每 5 秒重查，最多等待 5 分钟；辅助 Qwen 恢复最多等待 2 分钟。明确尚未提交的等待不占用生成尝试次数，服务就绪后由原编排接续。已有版本留下的确定失败节点，在服务恢复后点击“重试此任务”；显式重试会清除旧的等待期限，保留已完成配音和历史视频。
+**电脑重启后，网页已打开，但原生 H3 自动制作反复连接失败。** 网页服务就绪与模型服务就绪分别检查。自动编排会在上传参考素材、创建视频任务前，只读核对 ComfyUI 队列、当前工作流所需节点、模型和参考输入插槽。明确尚未提交的等待不占用生成尝试次数，服务就绪后由原编排接续。已有版本留下的确定失败节点，在服务恢复后点击“重试此任务”；显式重试保留已完成配音和历史视频。
 
-原生 Windows 工作站分别核对其配置的 ComfyUI 与 Qwen；Docker／远程节点使用系统设置中保存的实际服务地址，例如 `http://host.docker.internal:8788`，并保留节点身份、来源和内存保护检查。不要把网页 `/api/health` 成功当作模型全部就绪。
+原生 Windows 工作站核对其配置的 ComfyUI；Docker／远程节点使用系统设置中保存的实际服务地址，例如 `http://host.docker.internal:8189`，并核对节点、模型和显存状态。不要把网页 `/api/health` 成功当作模型全部就绪。
 
 缺少工作流节点、401／403／404、错误服务身份或无效响应会明确报错，需要修正配置，不会无限当作冷启动。超过等待期限时检查模型节点日志后再重试。已经向供应商发送 `/prompt`、受理结果未知的请求仍需核对原任务，不能因重启或超时直接重复生成。
 
@@ -89,7 +89,7 @@ docker context show
 
 容器的 `localhost` 是容器本身；Docker Desktop 宿主机通常用 `host.docker.internal`。远程 GPU 机用受控私网地址。检查服务实际监听、防火墙，以及设置页该档案的本地服务确认。正常修改服务档案不需要重建容器；管理员环境变量白名单是旧集成的可选部署方式。
 
-Context-IR 档案应连接节点入口 **8788**，不是尚未安装项目节点的普通 ComfyUI 8188/8189。出现节点、来源校验、Qwen health/vision、LoRA 或内存交接错误时，按 [本地推理节点教程](local-inference.md) 检查真实运行环境。不能把 `/v1/models` 能访问或 ComfyUI 首页能打开视为整条链路已准备好。
+原生 H3 档案应连接已安装匹配节点和模型的 ComfyUI origin。出现节点、模型、LoRA、视频参考插槽或显存错误时，按 [本地推理节点教程](local-inference.md) 检查真实运行环境。不能把 `/v1/models` 能访问或 ComfyUI 首页能打开视为整条链路已准备好。
 
 “下载了模型”不等于已启动服务。Windows 的 `E:\…` 路径、`.exe`、CUDA、原生 Python 环境不在 Linux 应用容器里。项目保留连接器并不等于对应模型已经容器化。Mac 的 Apple GPU 也不能运行 Windows CUDA 环境；当前没有 Mac 实机验证。
 

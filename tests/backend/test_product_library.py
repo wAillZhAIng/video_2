@@ -608,16 +608,16 @@ def test_studio_product_plan_requires_explicit_lock_for_unstructured_word_import
         assert e.value.code=='product_script_anchor_missing'
 
 
-def test_context_project_can_save_eight_views_without_spending_unused_keyframe_budget(client, settings):
-    product=upload(client,create_product(client, 'Eight-view product')['id'],[png(index) for index in range(8)])['product']
+def test_native_h3_project_can_save_nine_views_without_spending_keyframe_budget(client, settings):
+    product=upload(client,create_product(client, 'Nine-view product')['id'],[png(index) for index in range(9)])['product']
     project_id,shot_id,_,_=bind_product(client,settings,product)
     with client.app.state.session_factory() as session:
         service=session.scalar(select(m.AIService).where(m.AIService.module=='video_generation',m.AIService.is_default.is_(True)))
-        service.settings_json={**service.settings_json,'h3_context_ir':True,'workflow_profile':'context_ir'}
+        service.settings_json={**service.settings_json,'workflow_profile':'native_h3_r2v'}
         session.commit()
     endpoint=f'/api/product-library/projects/{project_id}/references'
     current=client.get(endpoint,params={'product_id':product['id']}).json()
-    assert current['limits']['max_reference_images']==8
+    assert current['limits']['max_reference_images']==9
     ids=[image['id'] for image in product['images']]
     saved=client.put(endpoint,json={'product_id':product['id'],'expected_token':current['expected_token'],
         'image_ids':ids,'shot_ids':[shot_id]})

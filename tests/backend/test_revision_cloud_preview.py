@@ -56,11 +56,9 @@ def test_cloud_product_name_scale_preview_equals_actual_submit_body(client,setti
     with client.app.state.session_factory() as s:
         s.add(m.ProjectServiceBinding(project_id=project,module='video_generation',service_id=service_id));s.commit()
     local_only={'instruction':payload['instruction'],'use_project_video_service':True}
-    blocked_preview=client.post(f'/api/videos/{video_id}/revision-preview',json=local_only)
-    blocked_submit=client.post(f'/api/videos/{video_id}/revise',json=local_only)
-    assert blocked_preview.status_code==blocked_submit.status_code==409
-    assert blocked_preview.json()['error']['code']==blocked_submit.json()['error']['code']=='context_ir_service_required'
-    assert calls==[]  # a local-only checkbox must never authorize paid cloud generation
+    project_preview=client.post(f'/api/videos/{video_id}/revision-preview',json=local_only)
+    assert project_preview.status_code == 200, project_preview.text
+    assert calls == []  # preview is side-effect free even when using the project service
     result=client.post(f'/api/videos/{video_id}/revise',json=payload)
     assert result.status_code==202,result.text
     assert len(calls)==1 and calls[0]['body']['prompt']==preview.json()['prompt']

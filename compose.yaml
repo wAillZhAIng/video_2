@@ -41,8 +41,7 @@ services:
       HOME: /app/data/home
       IMPORT_MAX_MB: ${IMPORT_MAX_MB:-50}
       COMFYUI_BASE_URL: ${COMFYUI_BASE_URL:-http://host.docker.internal:8189}
-      H3_CONTEXT_COMFYUI_URL: ${H3_CONTEXT_COMFYUI_URL:-http://host.docker.internal:8788}
-      H3_WORKFLOW_API_JSON: /app/workflows/h3_r2v_character_v1.json
+      H3_WORKFLOW_API_JSON: /app/workflows/h3_ref2va_native_fast4_v2.json
       TRUSTED_LOCAL_SERVICE_ORIGINS: ${TRUSTED_LOCAL_SERVICE_ORIGINS:-}
       LOCAL_SCREENPLAY_BASE_URL: ${LOCAL_SCREENPLAY_BASE_URL:-}
       LOCAL_SCREENPLAY_EXPECTED_WORKSPACE: ${LOCAL_SCREENPLAY_EXPECTED_WORKSPACE:-}

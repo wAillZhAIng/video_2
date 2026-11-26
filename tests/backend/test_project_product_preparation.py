@@ -163,8 +163,6 @@ def test_upload_select_persist_exact_chinese_name_suggestions_and_clear_scoped_s
 
 @pytest.mark.parametrize(('keyframe','video'), [(True,False), (False,True), (False,False)])
 def test_each_shot_product_reference_stage_can_be_left_empty(client, settings, keyframe, video):
-    from app.services.context_production_inputs import collect_context_inputs
-
     product = product_with_images(client)
     project_id, shots = project_with_shots(client)
     ids = [image['id'] for image in product['images']]
@@ -190,9 +188,6 @@ def test_each_shot_product_reference_stage_can_be_left_empty(client, settings, k
             assert {reference['id'] for reference in refs} == (set(ids) if enabled else set())
             sibling = session.get(m.StoryboardShot, shots[1])
             assert {reference['id'] for reference in product_library.shot_references(session,settings,sibling,stage=stage)} == set(ids)
-        context = collect_context_inputs(session, settings, shot)
-        assert {ref['asset_id'] for ref in context['references']} == (set(ids) if video else set())
-        assert ('\n商品：' in context['prompt']) is video
         run = session.scalar(select(m.StudioRun).where(m.StudioRun.project_id == project_id))
         assert run.status == 'paused' and run.snapshot_json['product_references_changed'] is True
     overview = selection(client, project_id, product['id'])

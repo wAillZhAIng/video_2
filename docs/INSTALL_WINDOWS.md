@@ -41,22 +41,22 @@ Start-Process 'http://127.0.0.1:8080'
 
 可选辅助脚本为 `./scripts/start.ps1`；若执行策略阻止它，直接使用上面的 Docker 命令。8080 被占用时可复制 `.env.example` 为 `.env`，只调整 `WEB_PORT` 后重新启动。不要向公网开放默认管理网页。
 
-旧 GHCR 发行镜像可用 `docker compose -f compose.prebuilt.yaml up -d`，但旧镜像可能没有本次 Context-IR 更新；不要将其直接用于已升级的数据库。开发隔离环境使用 `compose.dev.yaml`，默认项目 `video-factory-dev`、端口 `18083`。
+旧 GHCR 发行镜像可用 `docker compose -f compose.prebuilt.yaml up -d`，但旧镜像可能没有本次原生 H3 Ref2VA 更新；不要将其直接用于已升级的数据库。开发隔离环境使用 `compose.dev.yaml`，默认项目 `video-factory-dev`、端口 `18083`。
 
 ## 4. 安装本地模型节点
 
-按 [本地推理节点教程](local-inference.md) 安装/复用 ComfyUI、Qwen、H3、4step LoRA 和所需节点，完成来源校验与本机检查，再启动节点代理。项目提供安装工具与来源清单，不包含权重，也不会将已有模型重复下载。
+按 [本地推理节点教程](local-inference.md) 安装/复用 ComfyUI、MiniMax H3 Ref2VA、4-step LoRA 和所需节点，完成来源校验与本机检查，再启动受控的 ComfyUI 服务。项目提供启动工具与工作流，不包含权重，也不会将已有模型重复下载。
 
-三档 Context-IR 使用节点代理的 **8788** 入口。它负责素材理解、编译、显存交接与真实 ComfyUI 任务；仅打开普通 ComfyUI 8188/8189 不等于此入口已准备好。NVIDIA 驱动、模型许可证、内存/显存和对应 Python 运行环境仍需满足模型实际要求。
+三档原生 H3 工作流直接提交到 ComfyUI。应用在提交前检查 `/object_info`、实际 H3 节点、模型选择和参考输入插槽；只打开一个无匹配节点或模型的 ComfyUI 端口并不代表该服务已准备好。NVIDIA 驱动、模型许可证、内存/显存和对应 Python 运行环境仍需满足模型实际要求。
 
 应用容器不能运行 Windows `.exe` 或直接使用 `E:\Models` 路径。模型目录应填写在**主机节点配置**；网页填写节点的 HTTP 接口。
 
 ## 5. 在网页保存服务并制作小样
 
 1. 打开 **系统设置 → 添加服务**。用途选 **视频生成**，提供商选 **本地 / 私有 ComfyUI**。
-2. 内置工作流选 **Context-IR 三档：Fast 4 / Quality 20 / Quality 30**，地址填 `http://host.docker.internal:8788`；勾选 **确认这是我管理的本地模型服务**。
+2. 内置工作流选 **MiniMax H3 原生 Ref2VA：Fast 4 / 标准 20 / 高质量 30**，地址填实际可访问的 ComfyUI origin；Docker Desktop 默认档案通常为 `http://host.docker.internal:8189`。勾选 **确认这是我管理的本地模型服务**。
 3. 保存并 **测试连接**。无需为这个档案编辑 `.env`。如果节点在另一台自有 GPU 主机，改填真实私网地址；检查监听地址与防火墙，只允许受控网络访问。
-4. 在项目中选择该视频档案，保存制作画质：Fast＝4 步、标准＝20 步、高质量＝30 步。三档均使用 Context-IR，四步档需匹配的 LoRA 和采样节点。
+4. 在项目中选择该视频档案，保存制作画质：Fast＝4 步、标准＝20 步、高质量＝30 步。四步档需要匹配的 SMD LoRA 和采样节点；三档都直接使用原生 H3 Ref2VA 工作流。
 5. 下载当前 [剧本模板.docx](templates/剧本模板.docx)，导入一条短镜头，核对解析。按需添加人物、产品与声音参考，再开始制作。
 6. 等待真实任务结束，播放审核分镜，批准后合成 MP4，再下载检查。通过连接测试不能代替真实生成与人工审核。
 

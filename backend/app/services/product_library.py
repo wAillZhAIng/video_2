@@ -16,7 +16,7 @@ from app.models.screenplay_generation import ScreenplayInputAsset,ScreenplayGene
 from app.services.screenplay_generation_media import upload_asset,sha
 
 PURPOSES={'main','front','back','side','detail','usage','packaging','dimensions','other'}
-LIMITS={'max_images_per_product':32,'max_generation_images':8,'max_project_reference_images':8,'max_upload_bytes':10*1024**2,'formats':['.png','.jpg','.jpeg','.webp']}
+LIMITS={'max_images_per_product':32,'max_generation_images':8,'max_project_reference_images':9,'max_upload_bytes':10*1024**2,'formats':['.png','.jpg','.jpeg','.webp']}
 
 SHOT_REFERENCE_LIMITS={'keyframe_total_max':4,'video_total_max':9}
 _PRODUCT_SUBJECT_ERROR = 'Model ImageCard did not establish one object subject for product-unit:'
@@ -220,6 +220,30 @@ def freeze_products(session,settings,selections):
     if count>8:raise AppError(422,'product_model_image_limit','本次剧本模型最多接入8张图片，请从产品中选择部分图片')
     return result
 
+
+def freeze_video_product_references(session, settings, product_id, image_ids):
+    """Freeze up to the native H3 nine-image video budget without widening script limits.
+
+    ``freeze_products`` remains bounded by the script-model contract.  A direct
+    H3 video task accepts one additional image, so its immutable source records
+    are frozen in independently validated batches and then combined in the
+    user's existing product order.
+    """
+    if not image_ids or len(set(image_ids)) != len(image_ids):
+        raise AppError(422, 'product_reference_scope', '产品图片不能为空且不能重复')
+    if len(image_ids) > SHOT_REFERENCE_LIMITS['video_total_max']:
+        raise AppError(422, 'product_reference_budget', '本镜产品参考超过当前视频模型9张预算')
+    from app.schemas_product_library import ProductSelection
+    batches = []
+    for start in range(0, len(image_ids), LIMITS['max_generation_images']):
+        batches.append(freeze_products(session, settings, [ProductSelection(
+            product_id=product_id,
+            image_ids=list(image_ids[start:start + LIMITS['max_generation_images']]),
+        )])[0])
+    merged = {key:value for key,value in batches[0].items() if key != 'images'}
+    merged['images'] = [image for batch in batches for image in batch['images']]
+    return merged
+
 def bind_created_project(session,job,result):
     products=job.snapshot_json.get('products',[])
     if not products:return
@@ -394,7 +418,9 @@ def bind_existing_project(session, settings, project_id, payload):
         if len(set(entry.image_ids))!=len(entry.image_ids) or set(entry.image_ids)-selected:
             raise AppError(422,'product_reference_scope','镜头图片不属于本次产品快照或存在重复')
     from app.schemas_product_library import ProductSelection
-    frozen=freeze_products(session,settings,[ProductSelection(product_id=payload.product_id,image_ids=payload.image_ids)])[0]
+    native_h3 = _native_h3_product_references(session, project_id)
+    frozen=(freeze_video_product_references(session,settings,payload.product_id,payload.image_ids)
+            if native_h3 else freeze_products(session,settings,[ProductSelection(product_id=payload.product_id,image_ids=payload.image_ids)])[0])
     project_binding=session.scalar(select(ProjectProductBinding).where(ProjectProductBinding.project_id==project_id,ProjectProductBinding.product_id==payload.product_id))
     if project_binding:
         old={x['id']:x['sha256'] for x in project_binding.snapshot_json.get('images',[])}
@@ -419,14 +445,19 @@ def bind_existing_project(session, settings, project_id, payload):
         'human_visual_approval':False,'note':'产品原图已冻结；旧关键画面需重新核对，尚未批准镜头'}
 
 
-def _context_product_references(session, project_id):
+def _native_h3_product_references(session, project_id):
+    """Whether the selected production service accepts direct H3 image slots.
+
+    All supported ComfyUI video services now use the native H3 R2V path.  This
+    avoids a separate compiler profile while preserving the smaller keyframe
+    budget for non-H3 adapters.
+    """
     from app.services.ai_services import resolve_service
     try:
         _, snapshot = resolve_service(session, 'video_generation', project_id=project_id)
     except AppError:
         return False
-    options = snapshot.get('settings') or {}
-    return options.get('h3_context_ir') is True or options.get('workflow_profile') == 'context_ir'
+    return snapshot.get('provider') == 'comfyui'
 
 
 def project_references(session, project_id, product_id):
@@ -466,7 +497,7 @@ def project_references(session, project_id, product_id):
         available[image['id']]=image
     current['images']=list(available.values())
     return {'project_id':project_id,'product':current,'expected_token':token,
-        'limits':{'max_reference_images':LIMITS['max_project_reference_images'] if _context_product_references(session,project_id) else 4},
+        'limits':{'max_reference_images':LIMITS['max_project_reference_images'] if _native_h3_product_references(session,project_id) else 4},
         'image_ids':selected,'shot_ids':[shot_id for shot_id,image_ids in choices.items() if image_ids],
         'shots':result,'bound':binding is not None,
         'note':'仅所选分镜使用产品原图；更改后旧视频保留，后续生成会重新检查输入。'}
@@ -515,10 +546,12 @@ def save_project_references(session, settings, project_id, payload):
         raise AppError(422,'product_reference_scope','所选图片不属于当前产品')
     # Existing immutable photo entries are retained; only newly chosen entries
     # are frozen. No old file, video, or historical input snapshot is overwritten.
+    native_h3 = _native_h3_product_references(session, project_id)
     new_ids=chosen-set(old_images)
     if new_ids:
         from app.schemas_product_library import ProductSelection
-        frozen=freeze_products(session,settings,[ProductSelection(product_id=payload.product_id,image_ids=sorted(new_ids))])[0]
+        frozen=(freeze_video_product_references(session,settings,payload.product_id,sorted(new_ids))
+                if native_h3 else freeze_products(session,settings,[ProductSelection(product_id=payload.product_id,image_ids=sorted(new_ids))])[0])
     else:
         if current['product']['state']!='active':raise AppError(409,'product_archived','已移出图库的产品不能用于新配置')
         frozen={k:v for k,v in current['product'].items() if k!='images'}|{'images':[]}
@@ -529,14 +562,13 @@ def save_project_references(session, settings, project_id, payload):
             raise AppError(409,'product_source_changed','已冻结产品原图发生变化')
     merged={**old_images,**{image['id']:image for image in frozen['images']}}
     frozen['images']=list(merged.values())
-    context_only = _context_product_references(session, project_id)
     for shot_id in shots:
         others=list(session.scalars(select(ShotProductBinding).where(ShotProductBinding.shot_id==shot_id,
             ShotProductBinding.product_id!=payload.product_id)))
-        total=len(chosen)+sum(len(row.image_ids_json if context_only else row.state_json.get('keyframe_image_ids',row.image_ids_json)) for row in others)
-        if total>(9 if context_only else 4):
-            raise AppError(422,'product_reference_budget' if context_only else 'product_keyframe_budget',
-                           '本镜产品参考超过当前视频模型9张预算' if context_only else '此镜产品关键画面参考超过4张，请分别配置视频与关键画面参考')
+        total=len(chosen)+sum(len(row.image_ids_json if native_h3 else row.state_json.get('keyframe_image_ids',row.image_ids_json)) for row in others)
+        if total>(SHOT_REFERENCE_LIMITS['video_total_max'] if native_h3 else SHOT_REFERENCE_LIMITS['keyframe_total_max']):
+            raise AppError(422,'product_reference_budget' if native_h3 else 'product_keyframe_budget',
+                           '本镜产品参考超过当前视频模型9张预算' if native_h3 else '此镜产品关键画面参考超过4张，请分别配置视频与关键画面参考')
     if not project:
         project=ProjectProductBinding(project_id=project_id,product_id=payload.product_id,snapshot_json=frozen);session.add(project)
     else:project.snapshot_json=frozen
@@ -548,8 +580,9 @@ def save_project_references(session, settings, project_id, payload):
         if not row:
             row=ShotProductBinding(project_id=project_id,shot_id=shot_id,product_id=payload.product_id,revision=0);session.add(row)
         row.image_ids_json=list(payload.image_ids)
-        row.state_json={**(row.state_json or {}),'keyframe_image_ids':[] if context_only else list(payload.image_ids),
-            'context_only_references':context_only,
+        previous_state={key:value for key,value in (row.state_json or {}).items() if key != 'context_only_references'}
+        row.state_json={**previous_state,'keyframe_image_ids':[] if native_h3 else list(payload.image_ids),
+            'native_video_references':native_h3,
             'source':'project_product_preparation','reference_selection_confirmed':True}
         row.revision+=1
     if run and run.status in {'paused','exceptions'}:
@@ -582,12 +615,13 @@ def apply_studio_product_plan(session, settings, project_id, shots, plan):
     for model in (m.GenerationJob,m.ProductionVisual,m.MediaProcessTask):
         if session.scalar(select(model.id).where(model.project_id==project_id,model.status.in_({'queued','submitting','submitted','running','cancelling'})).limit(1)):
             raise AppError(409,'product_binding_busy','项目仍有制作任务，不能更改产品参考')
+    native_h3 = _native_h3_product_references(session, project_id)
     product=get_product(session,values['product_id'])
-    frozen=freeze_products(session,settings,[ProductSelection(product_id=product.id,image_ids=identifiers)])[0]
-    context_only = _context_product_references(session, project_id)
-    if not context_only and len(identifiers) > 4:
+    frozen=(freeze_video_product_references(session,settings,product.id,identifiers)
+            if native_h3 else freeze_products(session,settings,[ProductSelection(product_id=product.id,image_ids=identifiers)])[0])
+    if not native_h3 and len(identifiers) > SHOT_REFERENCE_LIMITS['keyframe_total_max']:
         raise AppError(422,'product_keyframe_budget','当前制作入口需要关键画面，请分别配置视频与关键画面参考，未丢弃所选图片')
-    keyframe_identifiers = [] if context_only else list(identifiers)
+    keyframe_identifiers = [] if native_h3 else list(identifiers)
     existing=session.scalar(select(ProjectProductBinding).where(ProjectProductBinding.project_id==project_id,ProjectProductBinding.product_id==product.id))
     if existing:
         known={item['id']:item['sha256'] for item in existing.snapshot_json.get('images',[])}

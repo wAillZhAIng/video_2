@@ -200,8 +200,7 @@ def test_revision_preview_and_generation_keep_exact_edited_prompt(client, revisi
         assert payload.prompt_override == edited
 
 
-@pytest.mark.parametrize('context_retry', [False, True])
-def test_retry_retains_edited_prompt_but_rebuilds_compiled_metadata(client, revision_source, monkeypatch, context_retry):
+def test_retry_replays_complete_frozen_input_snapshot(client, revision_source, monkeypatch):
     from app.api import routes
     source = revision_source
     edited = '保留这个精简后的原文。'
@@ -210,18 +209,16 @@ def test_retry_retains_edited_prompt_but_rebuilds_compiled_metadata(client, revi
         previous.status = 'failed'
         previous.parameters_json = {**previous.parameters_json, 'prompt_override': edited,
             'prompt_override_used': True, 'compiled_prompt': 'Old derived body',
-            'instruction': '缓慢推进。', 'provider_submission': {'sent_prompt': 'Old submitted body'}}
-        if context_retry:
-            previous.parameters_json = {**previous.parameters_json, 'h3_workflow': {'workflow_id':'frozen-context-retry-test'}}
+            'instruction': '缓慢推进。', 'provider_submission': {'sent_prompt': 'Old submitted body'},
+            'duration_seconds': 4, 'aspect_ratio': '16:9', 'negative_prompt': 'No text.'}
         session.commit()
     captured = {}
     async def generate(request, session, shot, payload, *, instruction=None, retry_count=0,
-                       frozen_job=None, frozen_service=None, legacy_production=False, revision_postprocess=None,
-                       revision_source=None):
+                       frozen_service=None, frozen_native_workflow=None, revision_postprocess=None,
+                       revision_source=None, frozen_retry_input=None):
         captured.update(prompt_override=payload.prompt_override, parameters=payload.parameters,
                         instruction=instruction, retry_count=retry_count,
-                        frozen_job_id=frozen_job.id if frozen_job else None,
-                        frozen_service=frozen_service, legacy_production=legacy_production)
+                        frozen_service=frozen_service, frozen_retry_input=frozen_retry_input)
         return session.get(m.GenerationJob, source.job_id), None
     monkeypatch.setattr(routes, 'generate_for_shot', generate)
     response = client.post('/api/jobs/'+source.job_id+'/retry')
@@ -229,10 +226,12 @@ def test_retry_retains_edited_prompt_but_rebuilds_compiled_metadata(client, revi
     assert captured['prompt_override'] == edited
     assert captured['instruction'] == '缓慢推进。'
     assert captured['retry_count'] == 1
-    assert captured['frozen_job_id'] == (source.job_id if context_retry else None)
-    assert captured['frozen_service'] == (None if context_retry else {'service_id':'source-service','model_id':'source-model'})
-    assert captured['legacy_production'] is (not context_retry)
-    assert not {'prompt_override', 'prompt_override_used', 'compiled_prompt', 'provider_submission'} & captured['parameters'].keys()
+    assert captured['parameters'] == {}
+    assert captured['frozen_service'] == {'service_id':'source-service','model_id':'source-model'}
+    assert captured['frozen_retry_input']['prompt'] == 'A fully clothed adult checks a closed notebook.'
+    assert captured['frozen_retry_input']['negative_prompt'] == 'No text.'
+    assert captured['frozen_retry_input']['parameters'] == {'width':1024, 'height':576, 'steps':30,
+        'studio_run_id':'old-run', 'studio_node_id':'old-node'}
 
 
 def test_cloud_revision_scale_is_in_authoritative_detailed_description():

@@ -167,6 +167,32 @@ def test_container_seed_only_creates_real_ffmpeg_configuration(settings,client):
         assert session.query(m.Project).count()==0
 
 
+def test_seed_leaves_existing_custom_video_service_unchanged(settings, client):
+    with client.app.state.session_factory() as session:
+        for service in session.query(m.AIService).filter_by(module='video_generation'):
+            session.delete(service)
+        custom = m.AIService(
+            id='custom_video_service', module='video_generation', provider='comfyui',
+            name='Custom local H3', base_url='http://127.0.0.1:8189', enabled=True,
+            is_default=True, default_model='custom-h3.safetensors',
+            settings_json={'timeout': 240, 'concurrency': 2, 'width': 960, 'height': 540},
+            capabilities_json={'reference_to_video': {'state': 'verified'}},
+            last_test_json={'status': 'connected'}, revision=7,
+        )
+        session.add(custom)
+        session.commit()
+
+        ai_services.seed_local_services(session, settings)
+        session.refresh(custom)
+
+        assert session.query(m.AIService).filter_by(module='video_generation').count() == 1
+        assert custom.default_model == 'custom-h3.safetensors'
+        assert custom.settings_json == {'timeout': 240, 'concurrency': 2, 'width': 960, 'height': 540}
+        assert custom.capabilities_json == {'reference_to_video': {'state': 'verified'}}
+        assert custom.last_test_json == {'status': 'connected'}
+        assert custom.revision == 7
+
+
 def test_runtime_health_reports_degraded_without_model_claims(client):
     response=client.get('/api/health/runtime');assert response.status_code==200
     body=response.json();assert body['application_ready'] and body['status']=='degraded'

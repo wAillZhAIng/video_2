@@ -6,7 +6,7 @@ import type { AIService } from '../pages/AIServicesPage';
 import { FormField } from './ui';
 
 type VideoBinding = { module: string; service_id: string; model_id?: string };
-type SelectionState = { busy: boolean; dirty: boolean; contextEnabled: boolean; hasContext: boolean; hasCloud: boolean };
+type SelectionState = { busy: boolean; dirty: boolean; nativeH3Enabled: boolean; hasNativeH3: boolean; hasCloud: boolean };
 type VideoConfig = { services: AIService[]; binding?: VideoBinding; profile: RouteProfile; candidates: TaskCandidate[]; container: boolean };
 const selectionKey = (serviceId: string, modelId: string) => JSON.stringify([serviceId, modelId]);
 const hasExplicitRoute = (profile: RouteProfile) => profile.revision > 0 || Boolean(profile.inherited_from && profile.inherited_from !== 'legacy_module_default');
@@ -24,11 +24,9 @@ function compatibleVideoModel(service: AIService | undefined, model: string) {
   }
 }
 
-function usesContext(service: AIService | undefined, model: string, container: boolean) {
-  if (!compatibleVideoModel(service, model) || service?.provider !== 'comfyui' || !model.toLowerCase().replace(/-/g, '_').startsWith('minimax_h3')) return false;
-  if (service.settings?.h3_context_ir === true || service.settings?.workflow_profile === 'context_ir') return true;
-  if (service.settings?.workflow_profile || service.settings?.h3_context_ir === false || container) return false;
-  try { return ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(service.base_url).hostname); } catch { return false; }
+function isNativeH3(service: AIService | undefined, model: string) {
+  return Boolean(compatibleVideoModel(service, model) && service?.provider === 'comfyui'
+    && model.toLowerCase().replace(/-/g, '_').startsWith('minimax_h3'));
 }
 
 export function VideoServiceSelector({ projectId, disabled = false, onStateChange, onSaved }: {
@@ -44,7 +42,7 @@ export function VideoServiceSelector({ projectId, disabled = false, onStateChang
   const bindingsUrl = `/api/projects/${project}/ai-services`;
   const busy = loading || saving;
 
-  useEffect(() => () => callbacks.current.onStateChange?.({ busy: false, dirty: false, contextEnabled: false, hasContext: false, hasCloud: false }), []);
+  useEffect(() => () => callbacks.current.onStateChange?.({ busy: false, dirty: false, nativeH3Enabled: false, hasNativeH3: false, hasCloud: false }), []);
   useEffect(() => {
     const abort = new AbortController();
     const init = { signal: abort.signal };
@@ -95,17 +93,17 @@ export function VideoServiceSelector({ projectId, disabled = false, onStateChang
   const canRestore = explicit ? Boolean(profile?.revision) : Boolean(legacy);
   const displayedService = draft ? selected?.service : currentService;
   const displayedModel = draft ? selected?.model || '' : currentModel;
-  const contextEnabled = draft ? usesContext(displayedService, displayedModel, config?.container ?? true)
+  const nativeH3Enabled = draft ? isNativeH3(displayedService, displayedModel)
     : activeChoices.length > 0 && activeChoices.every(choice => {
       const service = services.find(item => item.id === choice.service_id);
-      return usesContext(service, choice.model_id || service?.default_model || '', config?.container ?? true);
+      return isNativeH3(service, choice.model_id || service?.default_model || '');
     });
   const hasCloud = draft ? displayedService?.provider === 'video_api' : routeHasCloud;
-  const hasContext = draft ? contextEnabled : activeChoices.some(choice => {
+  const hasNativeH3 = draft ? nativeH3Enabled : activeChoices.some(choice => {
     const service = services.find(item => item.id === choice.service_id);
-    return usesContext(service, choice.model_id || service?.default_model || '', config?.container ?? true);
+    return isNativeH3(service, choice.model_id || service?.default_model || '');
   });
-  useEffect(() => { callbacks.current.onStateChange?.({ busy, dirty: Boolean(draft), contextEnabled, hasContext, hasCloud }); }, [busy, draft, contextEnabled, hasContext, hasCloud]);
+  useEffect(() => { callbacks.current.onStateChange?.({ busy, dirty: Boolean(draft), nativeH3Enabled, hasNativeH3, hasCloud }); }, [busy, draft, nativeH3Enabled, hasNativeH3, hasCloud]);
 
   async function save(restore = false) {
     if (!profile || busy || disabled || (restore ? !canRestore : !selected)) return;
@@ -138,7 +136,7 @@ export function VideoServiceSelector({ projectId, disabled = false, onStateChang
       <button type="button" className="button button-ghost" disabled={busy || disabled || !canRestore} onClick={() => void save(true)}>恢复继承设置</button>
       <button type="button" className="button button-secondary" disabled={busy || disabled || !selected} onClick={() => void save()}>保存为项目覆盖</button>
     </div>
-    <p className="form-hint">可选择已配置的本地或云端视频服务。只有 Context-IR 服务启用 4／20／30 步工作流；已派发任务沿用各自的服务快照。</p>
+    <p className="form-hint">可选择已配置的本地或云端视频服务。已验证的原生 MiniMax H3 服务支持 Fast 4／标准 20／高质量 30 步工作流；已派发任务沿用各自的服务快照。</p>
     {loading ? <p role="status">读取当前项目视频服务…</p> : null}
     {error ? <p role="alert">{error}</p> : null}
     {notice ? <p role="status">{notice}</p> : null}

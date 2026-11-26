@@ -28,7 +28,7 @@ from .screenplay_generation import ScreenplayGenerationJob,ScreenplayDocument,Sc
 from .character_reference import CharacterReferenceAsset,CharacterReferenceSet
 from .product_library import Product,ProductImage,ProjectProductBinding,ShotProductBinding,ProjectProductionPreference
 from .voice_library import VoiceLibraryAsset
-from .reference_video import ReferenceVideo,VideoAnalysis,StyleProfile
+from .reference_video import ReferenceVideo,ProjectReferenceVideo,VideoAnalysis,StyleProfile
 
 __all__ = [
     "Approval",

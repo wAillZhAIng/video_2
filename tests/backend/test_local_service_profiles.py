@@ -13,9 +13,9 @@ from app.services import ai_services
 
 def create_local(client, **changes):
     body = {'module': 'video_generation', 'provider': 'comfyui', 'name': 'My local node',
-            'base_url': 'http://host.docker.internal:8788',
+            'base_url': 'http://host.docker.internal:18188',
             'default_model': 'minimax_h3_ref2va_pruned_w6a8.safetensors',
-            'settings': {'local_service_origin': 'http://host.docker.internal:8788', 'workflow_profile': 'context_ir'}}
+            'settings': {'local_service_origin': 'http://host.docker.internal:18188', 'workflow_profile': 'native_h3_ref2va'}}
     body.update(changes)
     return client.post('/api/settings/ai-services', json=body)
 
@@ -26,15 +26,15 @@ def test_profile_confirmation_persists_without_environment_and_cannot_move(clien
     assert response.status_code == 201, response.text
     item = response.json()
     assert item['trusted_local_endpoint'] is True
-    assert item['settings']['h3_context_ir'] is True
-    assert item['settings']['local_service_origin'] == 'http://host.docker.internal:8788'
-    assert 'workflow_path' not in item['settings']
+    assert item['settings']['workflow_profile'] == 'native_h3_ref2va'
+    assert item['settings']['local_service_origin'] == 'http://host.docker.internal:18188'
+    assert item['settings']['workflow_path'] == str(ai_services.PROJECT_ROOT / 'workflows/h3_ref2va_native_fast4_v2.json')
     assert next(row for row in client.get('/api/settings/ai-services').json() if row['id'] == item['id'])['settings'] == item['settings']
     refused = client.patch('/api/settings/ai-services/' + item['id'], json={'base_url': 'http://host.docker.internal:9999'})
     assert refused.status_code == 422
     assert refused.json()['error']['code'] == 'local_origin_confirmation_mismatch'
     changed = client.patch('/api/settings/ai-services/' + item['id'], json={
-        'base_url': 'http://192.168.1.15:8788', 'settings': {**item['settings'], 'local_service_origin': 'http://192.168.1.15:8788'}})
+        'base_url': 'http://192.168.1.15:18188', 'settings': {**item['settings'], 'local_service_origin': 'http://192.168.1.15:18188'}})
     assert changed.status_code == 200
     assert changed.json()['trusted_local_endpoint'] is True
 
@@ -80,51 +80,23 @@ def test_local_request_pins_dns_retains_host_and_refuses_redirect(settings, monk
 def test_container_defaults_and_builtin_graph_are_server_paths(client, monkeypatch):
     monkeypatch.setenv('VIDEO_FACTORY_CONTAINER', '1')
     options = client.get('/api/settings/ai-service-options').json()
-    assert options['defaults']['context_ir'] == 'http://host.docker.internal:8788'
     assert options['defaults']['comfyui'] == 'http://host.docker.internal:8189'
-    response = create_local(client, settings={'local_service_origin': 'http://host.docker.internal:8788', 'workflow_profile': 'native_h3_r2v', 'workflow_path': 'C:/not-in-container/old.json'})
+    response = create_local(client, settings={'local_service_origin': 'http://host.docker.internal:18188', 'workflow_profile': 'native_h3_ref2va', 'workflow_path': 'C:/not-in-container/old.json'})
     assert response.status_code == 201
-    assert response.json()['settings']['workflow_path'] == str(ai_services.PROJECT_ROOT / 'workflows/h3_r2v_character_v1.json')
+    assert response.json()['settings']['workflow_path'] == str(ai_services.PROJECT_ROOT / 'workflows/h3_ref2va_native_fast4_v2.json')
     monkeypatch.delenv('VIDEO_FACTORY_CONTAINER')
-    assert client.get('/api/settings/ai-service-options').json()['defaults']['context_ir'] == 'http://127.0.0.1:8788'
 
 
 def test_reachable_comfy_with_missing_workflow_is_not_reported_ready(client, monkeypatch):
     async def inventory(*_args, **_kwargs):
         return httpx.Response(200, json={}, request=httpx.Request('GET', 'http://127.0.0.1:1/object_info'))
     monkeypatch.setattr(ai_services, 'service_request', inventory)
-    item = create_local(client, base_url='http://127.0.0.1:1', settings={'workflow_profile': 'native_h3_r2v'}).json()
+    item = create_local(client, base_url='http://127.0.0.1:1', settings={'workflow_profile': 'native_h3_ref2va'}).json()
     result = client.post('/api/settings/ai-services/' + item['id'] + '/test').json()
     assert result['last_test']['status'] == 'reachable'
     assert result['last_test']['generation_ready'] is False
     assert result['last_test']['diagnostic_code'] == 'comfy_workflow_not_ready'
     assert not result['capabilities']
-
-
-def test_context_probe_keeps_not_ready_runtime_checks_and_requires_real_receipt(client, monkeypatch):
-    runtime = {'schema_version': 1, 'service': 'video-factory-native-context-runtime-v1',
-               'watcher_running': True, 'source_baseline': {'ok': True},
-               'profile_id': 'local-h3ir-qwen4b-v3', 'memory_policy': 'runtime_owned',
-               'ready': False, 'checks': [{'name': 'models', 'ok': False}], 'qwen_health': {
-                   'service': 'video-factory-h3ir-qwen4b-v1', 'profile': 'h3ir-qwen4b-32k',
-                   'model_id': 'Qwen/Qwen3-VL-4B-Instruct', 'offline': True, 'max_model_len': 32768,
-                   'busy': False, 'loaded': False, 'script_sha256': 'a' * 64,
-                   'inference_phase': 'idle', 'gpu_release_status': 'not_used', 'last_gpu_cleanup': None}}
-    calls = []
-    async def inventory(_settings, _snapshot, _method, endpoint, *_args, **_kwargs):
-        calls.append(endpoint)
-        return httpx.Response(200, json=runtime if endpoint == '/video_factory/runtime' else {}, request=httpx.Request('GET', 'http://node:8788' + endpoint))
-    monkeypatch.setattr(ai_services, 'service_request', inventory)
-    item = create_local(client).json()
-    result = client.post('/api/settings/ai-services/' + item['id'] + '/test').json()['last_test']
-    assert result['diagnostic_code'] == 'context_ir_runtime_not_ready'
-    assert result['runtime']['checks'] == runtime['checks']
-    assert result['status'] == 'reachable' and result['capabilities'] == {}
-    assert calls == ['/object_info', '/video_factory/runtime']
-    runtime['ready'] = True
-    result = client.post('/api/settings/ai-services/' + item['id'] + '/test').json()['last_test']
-    assert result['status'] == 'connected'
-    assert result['capabilities']['reference_to_video']['state'] == 'detected'
 
 
 def test_pinned_local_client_covers_uploads_queries_and_every_request(monkeypatch):

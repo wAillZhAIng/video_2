@@ -22,6 +22,23 @@ class ReferenceVideo(TimestampMixin, Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class ProjectReferenceVideo(TimestampMixin, Base):
+    """An explicit project grant for a reusable reference-video asset.
+
+    Reference videos live in a reusable library, but a project must opt in to a
+    particular asset before it can reach a generation request.  Keeping this
+    association separate from the source file means that an asset selected by
+    one project is never silently inherited by another project.
+    """
+
+    __tablename__ = 'project_reference_videos'
+    __table_args__ = (UniqueConstraint('project_id', 'video_id', name='uq_project_reference_video'),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id('prjrefvideo'))
+    project_id: Mapped[str] = mapped_column(ForeignKey('projects.id'), index=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey('reference_videos.id'), index=True)
+
+
 class VideoAnalysis(TimestampMixin, Base):
     __tablename__ = 'video_analyses'
     __table_args__ = (UniqueConstraint('video_id', 'version', name='uq_video_analysis_version'),)

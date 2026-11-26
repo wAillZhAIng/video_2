@@ -98,8 +98,7 @@ def test_failed_or_incomplete_shots_cannot_queue_draft(studio):
 
 
 def test_start_opt_in_is_frozen_for_paused_history(studio):
-    # Keep the public native/legacy fixture; Context-IR is independently covered
-    # by its explicit production profile tests, not forced onto every service.
+    # Keep the native service fixture frozen for paused production history.
     run=create_pipeline(studio.session,studio.settings,studio.project.id,{'automatic_draft_assembly':True})
     run.status='paused'; studio.session.commit()
     frozen=run.snapshot_json['services'].copy()

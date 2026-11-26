@@ -12,7 +12,7 @@ router=APIRouter(prefix='/api/product-library',tags=['product-library'])
 
 
 def traced_selection(request,session,object_id,image_ids,save):
-    from app.services.context_references import request_trace_id,audit_reference_stage
+    from app.services.asset_reference_audit import request_trace_id,audit_reference_stage
     trace_id=request_trace_id(request)
     refs=[]
     for image_id in dict.fromkeys(image_ids):
@@ -84,7 +84,7 @@ def restore(identifier:str,request:Request,session:Session=Depends(get_db)):
 @router.post('/{identifier}/images',status_code=201)
 async def upload(identifier:str,request:Request,files:list[UploadFile]=File(...),purpose:str=Form('other'),notes:str=Form(''),session:Session=Depends(get_db)):
     import hashlib
-    from app.services.context_references import request_trace_id,audit_reference_stage
+    from app.services.asset_reference_audit import request_trace_id,audit_reference_stage
     trace_id=request_trace_id(request)
     settings=request.app.state.settings
     if not 1<=len(files)<=32:raise AppError(422,'product_file_count','每批请选择1至32张图片')

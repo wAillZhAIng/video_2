@@ -58,4 +58,5 @@ class ProjectProductionPreference(TimestampMixin,Base):
     __tablename__='project_production_preferences'
     id:Mapped[str]=mapped_column(ForeignKey('projects.id'),primary_key=True)
     dialogue_audio_policy:Mapped[str]=mapped_column(String(16),default='auto')
+    reference_video_defaults_json:Mapped[list]=mapped_column(JSON,default=list)
     revision:Mapped[int]=mapped_column(Integer,default=1)

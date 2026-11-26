@@ -16,6 +16,14 @@
 .studio-import form { padding-left:44px; }
 .studio-check { display:flex; align-items:flex-start; gap:10px; margin:16px 0; font-size:.83rem; color:var(--muted); line-height:1.6; }
 .studio-check input { margin-top:5px; flex-shrink:0; }
+.project-reference-videos,.project-reference-binding-scope,.project-reference-shot-list { display:grid; gap:14px; }
+.project-reference-videos { padding:16px 0; border-top:1px solid var(--border,#dbe2eb); border-bottom:1px solid var(--border,#dbe2eb); }
+.project-reference-video { display:grid; grid-template-columns:minmax(180px,.72fr) minmax(0,1.28fr); gap:14px; padding:14px; border:1px solid var(--border,#dbe2eb); border-radius:10px; }
+.project-reference-video-preview video { display:block; width:100%; max-height:180px; background:#101720; border-radius:8px; }
+.project-reference-video-fields { display:grid; align-content:start; gap:8px; }
+.project-reference-video-fields>p { margin:0; color:var(--muted); font-size:.82rem; }
+.project-reference-shot { padding:12px; }
+.project-reference-shot>summary { cursor:pointer; }
 .studio-import-bottom { justify-content:space-between; margin-top:20px; }
 .studio-import-bottom>span,.studio-muted { color:var(--muted); font-size:.8rem; }
 .studio-new-project { display:flex; flex-wrap:wrap; align-items:flex-end; gap:16px; }
@@ -123,6 +131,7 @@
   .studio-shot-table article { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
   .studio-render-grid { grid-template-columns:minmax(0,1fr); }
 }
+@media(max-width:640px) { .project-reference-video { grid-template-columns:1fr; } }
 @media(prefers-reduced-motion:reduce) { .studio-project-card { transition:none; } }
 
 /* Shared production quality and isolated model-lab views. */

@@ -10,6 +10,7 @@ import { ProjectProductPreparation } from '../components/ProjectProductPreparati
 import { ProjectProductReferences, type ProductReferenceState } from '../components/ProjectProductReferences';
 import { ProjectProductionModels } from '../components/ProjectProductionModels';
 import { ProjectAudioPolicy } from '../components/ProjectAudioPolicy';
+import { ProjectReferenceVideos } from '../components/ProjectReferenceVideos';
 import { ProjectVoicePreparation } from '../components/ProjectVoicePreparation';
 import { ProjectCharacterReferences } from '../components/ProjectCharacterReferences';
 import { QualitySettingsFields, QualityPlan, useQualityProfile } from '../components/QualitySettings';
@@ -70,9 +71,9 @@ export function StudioPage() {
   const voiceReady=voiceState.projectId===projectId&&voiceState.ready&&!voiceState.loading&&!voiceState.dirty&&!voiceState.busy;
   const [productReferenceState,setProductReferenceState]=useState({busy:false,dirty:false,overBudget:false});
   const onProductReferenceStateChange=useCallback((state:{busy:boolean;dirty:boolean;overBudget:boolean})=>setProductReferenceState(state),[]);
-  const [modelState,setModelState]=useState<{busy:boolean;dirty:boolean;contextEnabled?:boolean;hasContext?:boolean;hasCloud?:boolean}>({busy:false,dirty:false});
-  const qualityModeUse=!projectId||modelState.hasContext||modelState.contextEnabled?'generation':modelState.hasCloud?'cloud':'provider';
-  const onModelStateChange=useCallback((state:{busy:boolean;dirty:boolean;contextEnabled?:boolean;hasContext?:boolean;hasCloud?:boolean})=>setModelState(state),[]);
+  const [modelState,setModelState]=useState<{busy:boolean;dirty:boolean;nativeH3Enabled?:boolean;hasNativeH3?:boolean;hasCloud?:boolean}>({busy:false,dirty:false});
+  const qualityModeUse=!projectId||modelState.hasNativeH3||modelState.nativeH3Enabled?'generation':modelState.hasCloud?'cloud':'provider';
+  const onModelStateChange=useCallback((state:{busy:boolean;dirty:boolean;nativeH3Enabled?:boolean;hasNativeH3?:boolean;hasCloud?:boolean})=>setModelState(state),[]);
   const framingScope=`${projectId}:${data?.run?.id||'none'}:${data?.run?.status||'none'}`;
   const framingScopeRef=useRef(framingScope);framingScopeRef.current=framingScope;
   const [framingState,setFramingState]=useState({scope:'',busy:false,dirty:false,requiresNewRun:false,ready:false});
@@ -82,8 +83,9 @@ export function StudioPage() {
   const onAudioPolicyStateChange=useCallback((state:{busy:boolean;dirty:boolean})=>setAudioPolicyState(state),[]);
   const [referenceState,setReferenceState]=useState({busy:false,dirty:false});
   const onReferenceStateChange=useCallback((state:{busy:boolean;dirty:boolean})=>setReferenceState(state),[]);
+  const [referenceVideoState,setReferenceVideoState]=useState({busy:false,dirty:false});
   const voiceUnsettled=(voiceState.projectId===projectId&&(voiceState.busy||voiceState.dirty))||referenceState.busy||referenceState.dirty;
-  const preparationUnsettled=voiceUnsettled||audioPolicyState.busy||audioPolicyState.dirty||modelState.busy||modelState.dirty||productReferenceState.busy||productReferenceState.dirty||framingState.busy||framingState.dirty||Boolean(repairState?.dirty);
+  const preparationUnsettled=voiceUnsettled||referenceVideoState.busy||referenceVideoState.dirty||audioPolicyState.busy||audioPolicyState.dirty||modelState.busy||modelState.dirty||productReferenceState.busy||productReferenceState.dirty||framingState.busy||framingState.dirty||Boolean(repairState?.dirty);
   const activeRun=Boolean(data?.run&&!['completed','cancelled','failed','completed_with_errors','waiting_review'].includes(data.run.status));
   const nodes = Array.isArray(data?.run?.nodes_json) ? data.run.nodes_json as Record<string, unknown>[] : [];
   const completedNodes=new Set(nodes.filter(node=>node.status==='succeeded').map(node=>node.id));
@@ -98,12 +100,12 @@ export function StudioPage() {
   useEffect(()=>{if(projectId&&focusPreparation===projectId&&data?.project.id===projectId){const target=document.getElementById('project-voice-preparation');if(target){target.scrollIntoView?.({behavior:'smooth',block:'start'});setFocusPreparation('');}}},[projectId,focusPreparation,data?.project.id]);
   useEffect(()=>{if(!importReviewBusy)return;const guard=(event:MouseEvent)=>{if(event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;const target=event.target instanceof Element?event.target.closest('a[href]'):null;if(target){event.preventDefault();event.stopPropagation();setNotice('正在确认并保存剧本，请稍候再切换页面。');}};document.addEventListener('click',guard,true);return()=>document.removeEventListener('click',guard,true);},[importReviewBusy]);
   useEffect(()=>{
-    const busy=referenceState.busy||modelState.busy||audioPolicyState.busy||productReferenceState.busy||framingState.busy||audioResolutionBusy||repairState?.busy,dirty=referenceState.dirty||modelState.dirty||audioPolicyState.dirty||productReferenceState.dirty||framingState.dirty||repairState?.dirty;
+    const busy=referenceState.busy||referenceVideoState.busy||modelState.busy||audioPolicyState.busy||productReferenceState.busy||framingState.busy||audioResolutionBusy||repairState?.busy,dirty=referenceState.dirty||referenceVideoState.dirty||modelState.dirty||audioPolicyState.dirty||productReferenceState.dirty||framingState.dirty||repairState?.dirty;
     if((!busy&&!dirty)||voiceState.busy||voiceState.dirty)return;
     const unload=(event:BeforeUnloadEvent)=>{event.preventDefault();event.returnValue='';};
     const navigate=(event:MouseEvent)=>{if(event.defaultPrevented||event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;const link=event.target instanceof Element?event.target.closest<HTMLAnchorElement>('a[href]'):null;if(!link||link.hasAttribute('download')||(link.target&&link.target!=='_self'))return;const next=new URL(link.href,window.location.href),here=new URL(window.location.href);if(!['http:','https:'].includes(next.protocol)||next.origin===here.origin&&next.pathname===here.pathname&&next.search===here.search)return;if(busy){event.preventDefault();event.stopPropagation();setNotice('制作设置或人物参考图正在保存，请完成后再离开。');}else if(!window.confirm('制作设置或人物参考图有未保存的选择。确定放弃这些草稿并离开吗？')){event.preventDefault();event.stopPropagation();setNotice('已保留未保存的制作准备草稿。');}};
     document.addEventListener('click',navigate,true);window.addEventListener('beforeunload',unload);return()=>{document.removeEventListener('click',navigate,true);window.removeEventListener('beforeunload',unload);};
-  },[referenceState,modelState,audioPolicyState,productReferenceState,framingState,voiceState.busy,voiceState.dirty,audioResolutionBusy,repairState]);
+  },[referenceState,referenceVideoState,modelState,audioPolicyState,productReferenceState,framingState,voiceState.busy,voiceState.dirty,audioResolutionBusy,repairState]);
   async function perform(label: string, work: () => Promise<unknown>) {
     setBusy(label); setError(''); setNotice('');
     try { await work(); await studio.refreshList(); await studio.refreshAfterChange(); }
@@ -244,9 +246,10 @@ export function StudioPage() {
     <section className="card studio-panel studio-preparation-step" aria-label="第二步 制作设置"><p className="studio-step-label">第二步</p><h2>制作设置</h2><p>选择本次画质，导入后核对角色配音，再开始制作。{projectId?'未覆盖的镜头继承项目设置；已接收任务和旧视频保留原快照。':'新项目使用下方设置，不会更改系统默认。'}</p>
       {projectId?<ProjectProductionModels eagerVideo key={`models:${projectId}`} projectId={projectId} upscaleDisabled={pageBusy||Boolean(pendingImport)} disabled={pageBusy||voiceUnsettled||Boolean(pendingImport)||(activeRun&&data?.run?.status!=='paused')} onStateChange={onModelStateChange} onSaved={studio.refreshAfterChange}/>:null}
       {projectId?<ProjectShotFraming key={`framing:${projectId}:${data?.run?.id||'none'}:${data?.run?.status||'none'}`} projectId={projectId} disabled={pageBusy||Boolean(pendingImport)||quality.saving} onStateChange={onFramingStateChange} onSaved={(ratio,uniform)=>{if(uniform)quality.setSettings(previous=>({...previous,aspect_ratio:ratio}));}}/>:null}
+      {projectId&&data?.project.id===projectId?<ProjectReferenceVideos key={`reference-videos:${projectId}:${data?.script?.id||'none'}`} projectId={projectId} shots={shots} disabled={pageBusy||Boolean(pendingImport)||(activeRun&&data.run?.status!=='paused')} onStateChange={setReferenceVideoState} onSaved={studio.refreshAfterChange}/>:null}
       {projectId?<ProjectAudioPolicy key={`audio-policy:${projectId}`} projectId={projectId} onStateChange={onAudioPolicyStateChange} disabled={pageBusy||voiceUnsettled||Boolean(pendingImport)||(activeRun&&data?.run?.status!=='paused')} onSaved={async()=>{setAudioPolicyRevision(value=>value+1);await studio.refreshAfterChange();}}/>:null}
       {quality.loading?<p role="status">读取制作画质设置…</p>:null}{quality.error?<p role="alert" className="inline-notice warning">{quality.error}<button type="button" className="button button-secondary button-small" onClick={()=>void quality.load()}>重新读取画质</button></p>:null}
-      {quality.profile?<><p>来源：{quality.profile.inherited_from||'项目独立配置'} · 修订 {quality.profile.revision}</p>{modelState.hasContext&&modelState.hasCloud?<p role="status" className="inline-notice">当前策略包含本地 Context-IR 与云端候选。三档采样只用于本地 Context-IR；云端模型使用供应商参数。</p>:null}<QualitySettingsFields modeUse={qualityModeUse} value={quality.settings} onChange={quality.setSettings} capabilities={quality.capabilities} capabilityError={quality.capabilityError} onRefreshCapabilities={quality.refreshCapabilities} disabled={pageBusy||quality.saving||quality.loading}/>{projectId?<button type="button" className="button button-secondary" disabled={pageBusy||quality.saving||quality.loading||!quality.supported} onClick={()=>void quality.save().then(()=>setNotice('项目制作画质已保存，后续未覆盖镜头继承此配置。')).catch(()=>{})}>保存项目制作设置</button>:null}{projectId&&data?.run?<button type="button" className="button button-primary" disabled={pageBusy||quality.saving||quality.loading||!quality.supported} onClick={()=>void applyQuality()}>保存并应用到未派发画质任务</button>:null}{projectId?<SeedVrPreparation key={`seedvr:${projectId}`} projectId={projectId} settings={quality.settings} capabilities={quality.capabilities} shots={shots.map(shot=>({id:shot.id,order:shot.order,title:shot.title}))} disabled={pageBusy||quality.saving||quality.loading} onVerified={quality.refreshCapabilities}/>:null}{quality.dirty?<p className="studio-muted">本次选择尚未保存；上传时会随文档原子传入，开始续作时先保存。下方显示已保存方案。</p>:null}<QualityPlan plan={quality.profile.plan} modeUse={qualityModeUse}/></>:null}
+      {quality.profile?<><p>来源：{quality.profile.inherited_from||'项目独立配置'} · 修订 {quality.profile.revision}</p>{modelState.hasCloud?<p role="status" className="inline-notice">当前策略包含云端候选；启用云端调用时将使用供应商已支持的参数。</p>:null}<QualitySettingsFields modeUse={qualityModeUse} value={quality.settings} onChange={quality.setSettings} capabilities={quality.capabilities} capabilityError={quality.capabilityError} onRefreshCapabilities={quality.refreshCapabilities} disabled={pageBusy||quality.saving||quality.loading}/>{projectId?<button type="button" className="button button-secondary" disabled={pageBusy||quality.saving||quality.loading||!quality.supported} onClick={()=>void quality.save().then(()=>setNotice('项目制作画质已保存，后续未覆盖镜头继承此配置。')).catch(()=>{})}>保存项目制作设置</button>:null}{projectId&&data?.run?<button type="button" className="button button-primary" disabled={pageBusy||quality.saving||quality.loading||!quality.supported} onClick={()=>void applyQuality()}>保存并应用到未派发画质任务</button>:null}{projectId?<SeedVrPreparation key={`seedvr:${projectId}`} projectId={projectId} settings={quality.settings} capabilities={quality.capabilities} shots={shots.map(shot=>({id:shot.id,order:shot.order,title:shot.title}))} disabled={pageBusy||quality.saving||quality.loading} onVerified={quality.refreshCapabilities}/>:null}{quality.dirty?<p className="studio-muted">本次选择尚未保存；上传时会随文档原子传入，开始续作时先保存。下方显示已保存方案。</p>:null}<QualityPlan plan={quality.profile.plan} modeUse={qualityModeUse}/></>:null}
     </section>
     <section className="card studio-panel studio-preparation-step studio-role-settings" aria-label="第三步 角色设置"><p className="studio-step-label">第三步</p><h2>角色设置</h2><p>为每个角色保存声音与可选的人物参考图。绑定跟随角色 ID，未上传参考图时继续使用剧本描述和已有身份。</p>
     {projectId&&data?.project.id===projectId?<div id="project-voice-preparation"><ProjectVoicePreparation projectId={projectId} refreshKey={`${data?.script?.id||''}:${audioPolicyRevision}`} allowCloudCosts={cloudCosts} allowPaidFallback={paidFallback} disabled={pageBusy||Boolean(pendingImport)||quality.saving||(activeRun&&data.run?.status!=='paused')} onStateChange={onVoiceStateChange} onChanged={studio.refreshAfterChange}/></div>:null}
@@ -293,10 +296,8 @@ export function StudioPage() {
         const nodeId=recordText(item.node_id),runId=recordText(data.run?.id),message=recordText(item.message)||recordText(item.error);
         const targetId=recordText(item.target_id);
         const frozenRun=data.run?.snapshot_json;
-        const frozenShot=frozenRun?.h3_context_by_shot?.[targetId]?.inputs?.screenplay_snapshot?.shot;
         const frozenOrder=Array.isArray(frozenRun?.shot_ids)?frozenRun.shot_ids.indexOf(targetId)+1:0;
-        const shot=shots.find(shot=>shot.id===targetId)
-          ||(targetId&&frozenShot?.id===targetId?{id:targetId,order:frozenOrder,title:recordText(frozenShot.scene_title)||targetId}:null);
+        const shot=shots.find(shot=>shot.id===targetId);
         const retryable=['failed','blocked','waiting_user','waiting_exception','exception'].includes(item.status);
         const productMismatch=Boolean(runId&&nodeId&&shot&&retryable&&item.kind==='video'
           &&isProductReferenceError(item.code,message));

@@ -503,7 +503,7 @@ export function ReviewPage() {
                   <div><p className="eyebrow">参考约束的再生成</p><h2>修改指令</h2><p>这不是逐帧精准修补，也不保证未指定像素完全不变。</p></div>
                   <Badge tone="neutral">旧版本保留</Badge>
                 </div>
-                <FormField label="本次修改要求" required={!images.length} hint="可描述要改动的动作、画面或外观。图片修订使用本地 Context-IR H3。">
+                <FormField label="本次修改要求" required={!images.length} hint="可描述要改动的动作、画面或外观。图片修订直接使用本地 MiniMax H3。">
                   <textarea rows={4} value={instruction} aria-describedby={selectedRevisionError ? 'revision-error' : undefined} onChange={(event) => { setInstruction(event.target.value); clearRevisionPreview(); setRevisionError(null); }} />
                 </FormField>
                 <RevisionReferencePicker key={selected.id} videoId={selected.id} images={images}
@@ -527,7 +527,7 @@ export function ReviewPage() {
                     基于当前版本重新生成
                   </button>
                 </div>
-                {revisionJobId?<p role="status">{revisionJobPhase==='postprocessing'?'正在补齐修订的配音与画质，完成后可审核最终版本':revisionJobPhase==='connection_wait'?'连接暂时中断，正在等待读取原任务状态；请勿重复提交':'修订任务已提交，等待或执行参考图检查、Context-IR 编译及生成。'}</p>:null}
+                {revisionJobId?<p role="status">{revisionJobPhase==='postprocessing'?'正在补齐修订的配音与画质，完成后可审核最终版本':revisionJobPhase==='connection_wait'?'连接暂时中断，正在等待读取原任务状态；请勿重复提交':'修订任务已提交，等待原生参考图／视频输入检查与 MiniMax H3 生成。'}</p>:null}
                 {!revisionJobId && !selectedRevisionError && lastRevision?.error_message
                     && ['failed','cancelled','unknown'].includes(lastRevision.status)
                   ? <p className="inline-notice" role="status">上次修订 · {lastRevision.error_message}</p> : null}

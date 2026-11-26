@@ -34,7 +34,7 @@ def schema():return FileResponse(PROJECT_ROOT/'schemas/screenplay-ir.schema.json
 async def capabilities(request:Request):
     from app.services.providers import ComfyUIH3Provider
     health=await ComfyUIH3Provider(request.app.state.settings).health()
-    return {'video':{'provider':'comfyui_h3','health':health.to_dict(),'mode':'reference_to_video','reference_images':{'max':9,'roles':['identity','scene_reference','keyframe'],'exact_first_frame':False,'exact_last_frame':False},'actual_controls':['width','height','seed','length','steps'],'width_height':{'multiple_of':32,'adapter_max':1344},'fps':24,'frames':'17n+5','native_audio':True,'exact_lip_sync':False,'voice_clone':False,'camera_parameters':'visual intent only; no physical aperture/shutter control','evidence':['workflows/h3_r2v_character_v1.json','reports/cinematic/initial_audit.json','reports/product_upgrade_real/result.json']},
+    return {'video':{'provider':'comfyui_h3','health':health.to_dict(),'mode':'reference_to_video','reference_images':{'max':9,'roles':['identity','scene_reference','keyframe'],'exact_first_frame':False,'exact_last_frame':False},'reference_videos':{'max':3,'duration_seconds':{'min':2,'max_each':15,'max_total':15},'native_frame_input':True},'actual_controls':['width','height','seed','length','steps'],'width_height':{'multiple_of':32,'adapter_max':1344},'fps':24,'frames':'17n+5','native_audio':True,'exact_lip_sync':False,'voice_clone':False,'camera_parameters':'visual intent only; no physical aperture/shutter control','evidence':['workflows/h3_ref2va_native_fast4_v2.json','reports/cinematic/initial_audit.json','reports/product_upgrade_real/result.json']},
         'visual':{'candidate':'configured local Klein text-to-image graph','identity_conditioned':'installed Flux2 Klein ReferenceLatent workflow','max_adapter_references':4,'multi_reference_quality':'candidate, requires actual generation and human review','evidence':'workflows/character_klein_reference_v1.json'},'cloud':{'image_contract':'compatible images/generations and images/edits; explicit single validation before orchestration','video_contract':'video-jobs-v1; fps24; dimensions and durations must match the selected service','configured_is_verified':False,'native_mac_test':'NOT RUN','paid_cloud_test':'NOT RUN: user will configure credentials'},'semantic_parser':{'mode':'source_preserving_compatibility_rules','unrestricted_semantic_model_verified':False},'quality':{'technical':'FFprobe/full FFmpeg decode/specification checks','visual':'human review; no fabricated cinema score'}}
 
 
@@ -193,9 +193,10 @@ def approve_inputs(run_id:str,payload:ApprovalRequest,request:Request,session:Se
     run=get(session,m.ProductionRun,run_id);script=get(session,m.ScriptRevision,run.script_revision_id)
     if run.status in ['completed','cancelled']:raise AppError(409,'production_closed','此编排已结束')
     for step in run.steps_json:
-        context_run=step['shot_id'] in run.snapshot_json.get('h3_context_by_shot',{})
-        shot=get(session,m.StoryboardShot,step['shot_id']);pre=shot_preflight(session,request.app.state.settings,shot,require_visual=not context_run,context_inputs=context_run)
-        if not pre['ready']:raise AppError(409,'production_inputs_not_ready','请先确认本镜绑定的制作设定及参考素材' if context_run else '请先确认设定并审核关键画面',pre)
+        shot=get(session,m.StoryboardShot,step['shot_id'])
+        pre=shot_preflight(session,request.app.state.settings,shot,require_visual=True)
+        if not pre['ready']:
+            raise AppError(409,'production_inputs_not_ready','请先确认设定并审核关键画面与参考素材',pre)
     script.status='approved';script.approved_at=datetime.now(timezone.utc);script.approved_by=payload.operator
     approve_record(session,'script',script.id,script.revision,'approved',payload);session.commit()
     for step in run.steps_json:approve_shot(step['shot_id'],payload,session)

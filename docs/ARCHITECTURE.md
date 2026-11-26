@@ -82,7 +82,7 @@ flowchart TD
 
 镜像不附带模型权重、CUDA 或 Apple Metal/MPS 推理环境。没有未经验证的 GPU Compose 方案。宿主机 URL、容器 URL、宿主机文件路径与容器文件路径必须区分。`host.docker.internal` 是连接 Docker Desktop 宿主机的一种地址，不能保证只监听 loopback 的服务可达。
 
-本地 H3 三档通过独立节点的 8788 入口通信，节点协调 Qwen 素材理解、Context-IR 编译、内存交接及 ComfyUI 执行。部署步骤见 [本地推理节点](local-inference.md)。Fast 使用固定的 4step LoRA 配方，标准／高质量分别使用 Quality 20／30 步；应用冻结已派发任务的真实图、步数与素材快照。
+本地 H3 三档直接连接用户管理的 ComfyUI origin，并在派发前读取真实 `/object_info` 校验原生 Ref2VA 节点与工作流。冻结后的脚本、图片和可选视频帧直接进入 H3；不依赖中间语义编译或辅助语言服务。部署步骤见 [本地推理节点](local-inference.md)。Fast 使用固定的 4-step LoRA 配方，标准／高质量分别使用 Quality 20／30 步；应用冻结已派发任务的真实图、步数与素材快照。
 
 用户在设置页为自己管理的本地服务确认精确 origin。该权限保存在服务档案中，不需要重建容器；它不会赋予文档导入或任意媒体 URL 访问私网的权限。管理员仍可通过 `TRUSTED_LOCAL_SERVICE_ORIGINS` 给旧集成配置默认可信 origin。云端服务继续要求 HTTPS，未适配的语音、口型等远程协议不能仅靠填写 URL 使用。
 

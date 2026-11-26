@@ -66,7 +66,7 @@ def payload(f,ratio='9:16',ids=None):
 def add_run(f,status):
     with f.client.app.state.session_factory() as db:
         frozen={'options':{'quality':copy.deepcopy(f.quality),'quality_by_shot':{f.first:copy.deepcopy(f.quality)}},
-                'h3_context_by_shot':{f.first:{'native_canvas':[1024,576]}},'shot_ids':[f.first,f.second]}
+                'reference_videos_by_shot':{f.first:[]},'shot_ids':[f.first,f.second]}
         run=m.StudioRun(project_id=f.project_id,status=status,snapshot_json=frozen,nodes_json=[])
         db.add(run);db.commit();return run.id,copy.deepcopy(frozen)
 

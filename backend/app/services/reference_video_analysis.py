@@ -92,7 +92,8 @@ def probe_video(settings, path, *, full_decode=True):
             'full_decode': full_decode, 'evidence': 'ffprobe streams/format and FFmpeg complete decode'}
 
 
-def import_video(session, settings, filename, data, *, name='', category='', source_note='', usage_scope='abstract_style_only'):
+def import_video(session, settings, filename, data, *, name='', category='', source_note='',
+                 usage_scope='abstract_style_only', commit=True):
     extension = Path(filename).suffix.lower()
     if extension not in FORMATS:
         raise AppError(415, 'reference_video_format', '参考视频支持MP4、MOV、MKV和WebM')
@@ -112,14 +113,20 @@ def import_video(session, settings, filename, data, *, name='', category='', sou
                 stream.write(data)
             existing.metadata_json = {**probe_video(settings, original), 'restored_from_identical_upload_at': utcnow().isoformat()}
             existing.revision += 1
-            session.commit()
+            if commit:
+                session.commit()
+            else:
+                session.flush()
             return existing, True
         # Never overwrite changed bytes. Preserve their record and create a
         # separately owned original from this explicit upload instead.
         existing.state = 'source_changed'
         existing.revision += 1
         existing.metadata_json = {**existing.metadata_json, 'source_error': 'stored original no longer matches its registered SHA; preserved without overwrite'}
-        session.commit()
+        if commit:
+            session.commit()
+        else:
+            session.flush()
     identifier = new_id('refvideo')
     relative = f'asset_library/reference_videos/{identifier}/original{extension}'
     path = safe_media_path(settings.media_root, relative)
@@ -136,7 +143,8 @@ def import_video(session, settings, filename, data, *, name='', category='', sou
         session.add(m.ManagedFile(relative_path=relative, state='active',
             ownership_json=[{'table': 'reference_videos', 'id': identifier}],
             metadata_json={'sha256': sha, 'verified_owned': True, 'kind': 'reference_video_original'}))
-        session.commit()
+        if commit:
+            session.commit()
         return item, False
     except Exception:
         session.rollback()

@@ -68,7 +68,7 @@ it('changes only the project module binding when cloud is the inherited module d
 });
 
 it('offers an explicitly confirmed private local endpoint and hides an unconfirmed private endpoint', async () => {
-  const confirmed = { ...local, id: 'lan', name: '局域网推理节点', base_url: 'http://192.168.1.20:8788', trusted_local_endpoint: true };
+  const confirmed = { ...local, id: 'lan', name: '局域网推理节点', base_url: 'http://192.168.1.20:8189', trusted_local_endpoint: true };
   const unconfirmed = { ...confirmed, id: 'unknown', name: '未确认节点', trusted_local_endpoint: false };
   mocked.mockImplementation(async url => {
     if (url.startsWith('/api/settings/ai-services')) return [confirmed, unconfirmed];
@@ -98,16 +98,16 @@ it('saves an eligible cloud choice as cloud_only and does not enable paid fallba
   await waitFor(()=>expect(mocked.mock.calls.some(([,init])=>init?.method==='PUT')).toBe(true));
   const saved=mocked.mock.calls.find(([,init])=>init?.method==='PUT')!;
   expect(JSON.parse(String(saved[1]?.body)).settings).toMatchObject({mode:'cloud_only',choices:[{service_id:cloud.id,model_id:cloud.default_model}],allow_paid_fallback:false,allow_fallback:false});
-  await waitFor(()=>expect(state.mock.lastCall?.[0]).toMatchObject({contextEnabled:false,hasCloud:true}));
+  await waitFor(()=>expect(state.mock.lastCall?.[0]).toMatchObject({nativeH3Enabled:false,hasCloud:true}));
 });
 
 it.each([
-  [true,{},false],
-  [false,{},true],
-  [true,{workflow_profile:'context_ir',h3_context_ir:true},true],
-  [false,{workflow_profile:'native_h3_r2v',h3_context_ir:false},false],
-])('reports Context eligibility for container=%s and profile=%j',async(container,settings,expected)=>{
-  const native={...local,is_default:true,settings};
+  [true,{},'minimax_h3_w6a8',true],
+  [false,{},'minimax_h3_w6a8',true],
+  [true,{workflow_profile:'native_h3_ref2va'},'minimax_h3_w6a8',true],
+  [false,{workflow_profile:'provider'},'another_video_model',false],
+])('reports native H3 eligibility for container=%s and profile=%j',async(container,settings,default_model,expected)=>{
+  const native={...local,is_default:true,settings,default_model};
   mocked.mockImplementation(async url=>{
     if(url.startsWith('/api/settings/ai-services'))return [native];
     if(url===bindingUrl)return [];
@@ -117,5 +117,5 @@ it.each([
   });
   const state=vi.fn();
   render(<MemoryRouter><VideoServiceSelector projectId="p1" onStateChange={state}/></MemoryRouter>);
-  await waitFor(()=>expect(state.mock.lastCall?.[0]).toMatchObject({busy:false,contextEnabled:expected,hasCloud:false}));
+  await waitFor(()=>expect(state.mock.lastCall?.[0]).toMatchObject({busy:false,nativeH3Enabled:expected,hasCloud:false}));
 });

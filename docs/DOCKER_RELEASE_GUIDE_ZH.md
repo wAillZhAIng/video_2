@@ -1,6 +1,6 @@
 # Docker 部署、升级、备份与发布
 
-普通用户只需要 Docker Desktop 和公开项目文件。默认命令会构建当前下载的源码，使本次 Context-IR、三档工作流和模板更新实际生效。已有 GHCR 发行镜像是可选路线，不能用此前发行镜像的验收证明本次修改已经发布或通过；实际测试范围见 [发布验收记录](RELEASE_VALIDATION.md)。
+普通用户只需要 Docker Desktop 和公开项目文件。默认命令会构建当前下载的源码，使当前的原生 H3 Ref2VA 三档工作流和模板更新实际生效。已有 GHCR 发行镜像是可选路线，不能用此前发行镜像的验收证明本次修改已经发布或通过；实际测试范围见 [发布验收记录](RELEASE_VALIDATION.md)。
 
 ## 1. 镜像与依赖来源
 
@@ -29,7 +29,7 @@ docker compose ps
 
 `compose.yaml` 含 `build`，使用 [Compose 的 `pull_policy: build`](https://docs.docker.com/reference/compose-file/services/#pull_policy)，因此不额外加 `--build` 也会构建当前源码。依赖锁文件和 BuildKit 缓存保留，默认 `127.0.0.1:8080`、项目 `video-factory`、三个命名卷及非 root 运行。无需先创建 `.env`；密钥在设置页保存，不放进部署配置或前端环境变量。
 
-预构建版本使用独立文件：`docker compose -f compose.prebuilt.yaml up -d`。该文件只有发行镜像，采用 `pull_policy: always`；已发布的旧镜像可能缺少本次 Context-IR 更新。先确认版本和数据库兼容性，再选择这条路线，不混合新前端与旧后端。
+预构建版本使用独立文件：`docker compose -f compose.prebuilt.yaml up -d`。该文件只有发行镜像，采用 `pull_policy: always`；已发布的旧镜像可能缺少当前原生 H3 Ref2VA 更新。先确认版本和数据库兼容性，再选择这条路线，不混合新前端与旧后端。
 
 开发部署是独立 Compose 文件：
 

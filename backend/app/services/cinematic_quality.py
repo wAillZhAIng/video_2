@@ -107,10 +107,14 @@ def visual_inputs(session,shot):
     participants=list(session.scalars(select(m.ShotCharacter).where(m.ShotCharacter.shot_id==shot.id).order_by(m.ShotCharacter.order,m.ShotCharacter.id)))
     from app.services.product_library import shot_product_snapshot
     products=shot_product_snapshot(session,shot)
-    motion_state={}
-    if production.get('motion_references'):
-        from app.services.motion_references import motion_live_state
-        motion_state={'motion_reference_state':motion_live_state(session,production['motion_references'])}
+    from app.services.motion_references import configured_motion_reference_values, motion_live_state
+    motion_selection = configured_motion_reference_values(session, shot)
+    motion_state = {}
+    if motion_selection:
+        motion_state = {
+            'motion_reference_selection': motion_selection,
+            'motion_reference_state': motion_live_state(session, motion_selection),
+        }
     return {'shot_id':shot.id,'visual_prompt':shot.visual_prompt,'action':shot.action,'camera_move':shot.camera_move,'lighting':shot.lighting,
         'photography':detail.photography_json if detail else {},'environment':scene.environment_json if scene else {},
         'production':{k:v for k,v in production.items() if k!='visual_ids'},
@@ -128,22 +132,13 @@ def generation_inputs_hash(session,shot):
 
 
 def frozen_generation_inputs_hash(parameters, *, fallback=None):
-    """Read the canonical video-input identity independently of cinematic metadata.
-
-    New jobs persist this at the parameters root.  The nested value is read only
-    for pre-migration frozen jobs; it is not a generation or routing branch.
-    """
+    """Read the single canonical video-input identity."""
     if not isinstance(parameters,dict): return fallback
     value=parameters.get('generation_inputs_hash')
-    if isinstance(value,str) and value: return value
-    snapshot=parameters.get('screenplay_snapshot')
-    cinematic=snapshot.get('cinematic') if isinstance(snapshot,dict) else None
-    preflight=cinematic.get('preflight') if isinstance(cinematic,dict) else None
-    value=preflight.get('generation_inputs_hash') if isinstance(preflight,dict) else None
     return value if isinstance(value,str) and value else fallback
 
 
-def shot_preflight(session,settings,shot,require_visual=True,*,context_inputs=False,explicit_visual_ids=None,explicit_motion=None,
+def shot_preflight(session,settings,shot,require_visual=True,*,explicit_visual_ids=None,explicit_motion=None,
                    revision_references=()):
     from app.services.screenplay import shot_bundle
     from app.services.revision_references import replaced_targets
@@ -154,17 +149,15 @@ def shot_preflight(session,settings,shot,require_visual=True,*,context_inputs=Fa
         siblings=list(session.scalars(select(m.StoryboardShot).join(m.ShotDetail,m.ShotDetail.shot_id==m.StoryboardShot.id).join(m.Scene,m.Scene.id==m.ShotDetail.scene_id).where(m.Scene.script_revision_id==script.id).order_by(m.StoryboardShot.order,m.StoryboardShot.id)))
         report=inspect_ir(database_ir(session,script,siblings))
         findings.extend(f for f in report['findings'] if f['shot_key'] in [None,shot.id]
-                        and (f['severity'] in ['blocker','review'] or f['code'] in OPTIONAL_DESIGN_FINDINGS)
-                        and not(context_inputs and f['code']=='cast_unknown'))
-    if not enabled and not context_inputs:findings.append(issue('legacy_rules','review','旧镜头未采用电影规范；须主动建立新修订以应用新规范',shot.id))
+                        and (f['severity'] in ['blocker','review'] or f['code'] in OPTIONAL_DESIGN_FINDINGS))
+    if not enabled:findings.append(issue('legacy_rules','review','旧镜头未采用电影规范；须主动建立新修订以应用新规范',shot.id))
     replaced_actors = replaced_targets(revision_references, 'identity')
     image_participants = [p for p in bundle['participants'] if p['reference_asset_ids_json']
-                          and p['character_id'] not in replaced_actors] if context_inputs else bundle['participants']
+                          and p['character_id'] not in replaced_actors]
     for p in bundle['participants']:
-        if context_inputs:
-            version=session.get(m.CharacterVersion,p['character_version_id']) if p.get('character_version_id') else None
-            if version and version.character_id!=p['character_id']:findings.append(issue('identity_version_owner_mismatch','blocker',p['name']+'的身份版本属于另一人物',shot.id,repair='identity'))
-        elif p['version_state']!='approved' or not p['reference_asset_ids_json']:findings.append(issue('identity_not_ready','blocker',p['name']+'缺少正式身份或已审核参考',shot.id,repair='identity'))
+        version=session.get(m.CharacterVersion,p['character_version_id']) if p.get('character_version_id') else None
+        if version and version.character_id!=p['character_id']:findings.append(issue('identity_version_owner_mismatch','blocker',p['name']+'的身份版本属于另一人物',shot.id,repair='identity'))
+        if p['version_state']!='approved' or not p['reference_asset_ids_json']:findings.append(issue('identity_not_ready','blocker',p['name']+'缺少正式身份或已审核参考',shot.id,repair='identity'))
     if image_participants:
         try:
             from app.services.identity_references import actor_references
@@ -185,7 +178,12 @@ def shot_preflight(session,settings,shot,require_visual=True,*,context_inputs=Fa
         elif e.project_id!=shot.project_id:findings.append(issue('design_project_mismatch','blocker','制作设定属于其他项目',shot.id))
         elif e.status!='approved':findings.append(issue('design_unreviewed','review',e.name+' v'+str(e.version)+'尚未审核确认',shot.id,repair='wardrobe' if e.kind=='wardrobe' else 'scene' if e.kind=='scene_state' else 'prop'))
     beats=prod.get('beats',[])
-    motion_selection=explicit_motion if context_inputs and explicit_motion is not None else prod.get('motion_references')
+    # Native Ref2VA selections are explicit frozen task inputs.
+    if explicit_motion is None:
+        from app.services.motion_references import configured_motion_reference_values
+        motion_selection = configured_motion_reference_values(session, shot)
+    else:
+        motion_selection = explicit_motion
     if motion_selection:
         try:
             from app.services.motion_references import resolve_motion_references
@@ -202,7 +200,7 @@ def shot_preflight(session,settings,shot,require_visual=True,*,context_inputs=Fa
             findings.append(issue('unsupported_control','blocker','当前H3工作流未验证精确控制：'+control,shot.id))
     visuals=[];input_hash=fingerprint(visual_inputs(session,shot))
     visual_selection=list(prod.get('visual_ids',[]))
-    if context_inputs and explicit_visual_ids is not None:
+    if explicit_visual_ids is not None:
         # An explicit input replaces composition images. Keep independently
         # bound scene references and validate every selected ID below.
         visual_selection=[*explicit_visual_ids,*(identifier for identifier in visual_selection
@@ -213,21 +211,18 @@ def shot_preflight(session,settings,shot,require_visual=True,*,context_inputs=Fa
         visual=session.get(m.ProductionVisual,identifier)
         if not visual or visual.project_id!=shot.project_id or visual.status!='approved':findings.append(issue('visual_not_approved','blocker','所选视觉参考未批准或不属于此项目',shot.id));continue
         if visual.kind=='scene_reference' and (not scene or visual.scene_id!=scene.id or visual.entity_id!=prod.get('scene_state_id') or visual.snapshot_json.get('visual_inputs',{}).get('environment')!=scene.environment_json):findings.append(issue('scene_reference_mismatch','blocker','场景参考与本镜场景状态或环境不符，请选择对应版本',shot.id));continue
-        if (visual.shot_id and visual.shot_id!=shot.id) or (context_inputs and visual.kind=='keyframe' and visual.shot_id!=shot.id):findings.append(issue('keyframe_wrong_shot','blocker','关键画面属于其他镜头',shot.id));continue
-        explicit_upload=context_inputs and identifier in (explicit_visual_ids or []) and visual.snapshot_json.get('source')=='user_upload'
+        if visual.shot_id and visual.shot_id!=shot.id:findings.append(issue('keyframe_wrong_shot','blocker','关键画面属于其他镜头',shot.id));continue
+        explicit_upload=identifier in (explicit_visual_ids or []) and visual.snapshot_json.get('source')=='user_upload'
         if visual.kind=='keyframe' and not explicit_upload and visual.snapshot_json.get('inputs_hash')!=input_hash:findings.append(issue('keyframe_stale','blocker','关键画面对应旧版表演/造型/场景，请重新确认或生成当前版本',shot.id));continue
-        if context_inputs and visual.kind not in {'scene_reference','keyframe'}:findings.append(issue('context_visual_unsupported','blocker','此素材不是已批准场景参考或镜头图片',shot.id));continue
+        if visual.kind not in {'scene_reference','keyframe'}:findings.append(issue('native_visual_unsupported','blocker','此素材不是已批准场景参考或镜头图片',shot.id));continue
         try:
             import hashlib
             path=safe_media_path(settings.media_root,visual.relative_path,must_exist=True)
             if hashlib.sha256(path.read_bytes()).hexdigest()!=visual.sha256:raise ValueError()
         except Exception:findings.append(issue('visual_file_invalid','blocker','视觉参考文件缺失或哈希变化',shot.id));continue
         visuals.append(visual)
-    if not context_inputs and not bundle['participants']:
-        if not visuals and not product_references:
-            findings.append(issue('cast_not_ready','blocker','参考生视频需要至少一张可用的画面参考，可绑定场景图或关键画面',shot.id))
-        elif visuals:
-            findings=[finding for finding in findings if finding['code']!='cast_unknown']
+    if not bundle['participants']:
+        findings=[finding for finding in findings if finding['code']!='cast_unknown']
     visual_review_required = require_visual and prod.get('require_visual_review', True) is not False
     if enabled and visual_review_required and not any(v.kind=='keyframe' for v in visuals):findings.append(issue('keyframe_review_required','review','先生成并审核本镜关键画面，再提交电影镜头',shot.id))
     policy=prod.get('requested_controls',{}).get('identity_reference_policy','full_reference')
@@ -244,8 +239,6 @@ def shot_preflight(session,settings,shot,require_visual=True,*,context_inputs=Fa
 
 
 def inspect_generated(job,checks):
-    cinematic=job.parameters_json.get('screenplay_snapshot',{}).get('cinematic')
-    if not cinematic:return []
     decode=next((c['details'] for c in checks if c['check_type']=='media_decode' and c['status']=='passed'),None)
     if not decode:return [{'check_type':'cinematic_output_spec','status':'failed','details':{'reason':'media_decode_not_passed'}}]
     from fractions import Fraction
@@ -342,20 +335,3 @@ def physical_directions(context,performer_names=None):
         if state.get('description'):
             result.append('Prop direction: '+str(state['description']))
     return '\n'.join(result)
-
-
-def compile_context(session,shot,settings):
-    detail,scene,script,production,entities=production_context(session,shot)
-    if not script or not script.parsed_json.get('versions'):return None
-    rules=script.parsed_json.get('rules_snapshot')
-    if not rules:return None
-    from app.services.cinematic_rules import generation_rules
-    rules=generation_rules(rules)
-    from app.services.screenplay import shot_bundle
-    from app.services.product_library import shot_product_snapshot
-    participants=shot_bundle(session,shot.id)['participants']
-    product_only=not participants and any(product['images'] for product in shot_product_snapshot(session,shot))
-    rules_text='\n'.join(rules['visual_language'][key] for key in ('scene','camera','audio')) if not participants else '\n'.join(rules['visual_language'].values())
-    if product_only:rules_text+='\nPreserve each referenced product shape, proportions, color, packaging and visible structure. Exact printed text and logo reproduction require visual review or post-production overlays. Do not invent performers or unsupported accessories.'
-    names={p['name']:i for i,p in enumerate(participants,1)}
-    return {'contact_directions':physical_directions(visual_inputs(session,shot),names),'versions':rules['versions'],'source_versions':script.parsed_json['versions'],'rules_source_sha256':rules['source_sha256'],'rules_text':rules_text,'production':production,'entities':[{'id':e.id,'logical_id':e.logical_id,'kind':e.kind,'version':e.version,'status':e.status,'spec':e.spec_json} for e in entities if e],'preflight':shot_preflight(session,settings,shot)}

@@ -78,6 +78,62 @@ def test_timeout_migration_clears_existing_service_caps(tmp_path: Path) -> None:
     finally:
         engine.dispose()
 
+
+def test_project_reference_video_link_migration_backfills_active_shot_choices(tmp_path: Path) -> None:
+    database_path = tmp_path / "project-reference-video-links.db"
+    upgraded = run_alembic(database_path, "upgrade", "0013")
+    assert upgraded.returncode == 0, upgraded.stderr
+
+    from sqlalchemy.orm import Session
+    from app.models import Project, ReferenceVideo, ShotDetail, StoryboardShot
+
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with Session(engine) as session:
+            first_project = Project(id="prj_migration_first", name="first")
+            second_project = Project(id="prj_migration_second", name="second")
+            first_shot = StoryboardShot(id="shot_migration_first", project_id=first_project.id, order=1)
+            second_shot = StoryboardShot(id="shot_migration_second", project_id=second_project.id, order=1)
+            active_video = ReferenceVideo(
+                id="refvideo_active", name="active", filename="active.mp4",
+                relative_path="reference/active.mp4", sha256="a" * 64, state="active",
+            )
+            inactive_video = ReferenceVideo(
+                id="refvideo_inactive", name="inactive", filename="inactive.mp4",
+                relative_path="reference/inactive.mp4", sha256="b" * 64, state="deleted",
+            )
+            session.add_all([
+                first_project, second_project, first_shot, second_shot, active_video, inactive_video,
+                ShotDetail(
+                    shot_id=first_shot.id,
+                    source_json={"production": {"motion_references": [
+                        {"video_id": active_video.id}, {"video_id": inactive_video.id}, {"video_id": "missing"},
+                    ]}},
+                ),
+                ShotDetail(
+                    shot_id=second_shot.id,
+                    source_json={"production": {"motion_references": [{"video_id": active_video.id}]}},
+                ),
+            ])
+            session.commit()
+    finally:
+        engine.dispose()
+
+    upgraded = run_alembic(database_path, "upgrade", "head")
+    assert upgraded.returncode == 0, upgraded.stderr
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with engine.connect() as connection:
+            links = set(connection.execute(text(
+                "SELECT project_id, video_id FROM project_reference_videos"
+            )).tuples())
+            assert links == {
+                ("prj_migration_first", "refvideo_active"),
+                ("prj_migration_second", "refvideo_active"),
+            }
+    finally:
+        engine.dispose()
+
     upgraded = run_alembic(database_path, "upgrade", "head")
     assert upgraded.returncode == 0, upgraded.stderr
     engine = create_engine(f"sqlite:///{database_path.as_posix()}")

@@ -85,14 +85,14 @@ OWNED['storyboard_shots'].add('studio_decisions')
 OWNED['projects'].update({'character_reference_sets','character_reference_assets','screenplay_project_name_claims','screenplay_generation_jobs'})
 OWNED['characters'].update({'character_reference_sets','character_reference_assets'})
 OWNED['screenplay_generation_jobs']={'screenplay_documents','screenplay_project_name_claims'}
-OWNED['projects'].update({'project_product_bindings','shot_product_bindings','project_production_preferences'})
+OWNED['projects'].update({'project_product_bindings','shot_product_bindings','project_production_preferences','project_reference_videos'})
 OWNED['storyboard_shots'].add('shot_product_bindings')
 OWNED['projects'].update({'media_process_tasks','audio_assets'})
 OWNED['storyboard_shots'].update({'media_process_tasks','audio_assets'})
 OWNED['media_process_tasks']={'audio_assets'}
 OWNED['video_revisions'].add('quality_renders')
 OWNED['products']={'product_images'}
-OWNED['reference_videos']={'video_analyses'}
+OWNED['reference_videos']={'video_analyses','project_reference_videos'}
 SCOPED_OWNERS={'projects':'project','storyboard_shots':'shot'}
 
 

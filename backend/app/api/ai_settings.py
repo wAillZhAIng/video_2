@@ -25,7 +25,7 @@ def service_options():
     host = 'host.docker.internal' if container else '127.0.0.1'
     return {'container': container, 'defaults': {
         'comfyui': f'http://{host}:8189', 'local_llm': f'http://{host}:1234/v1',
-        'context_ir': f'http://{host}:8788', 'local_asr': ASR_URL,
+        'local_asr': ASR_URL,
         'background_music': os.getenv('COMFYUI_BASE_URL', 'http://127.0.0.1:8189')}, 'video_workflows': BUILTIN_VIDEO_WORKFLOWS,
         'notice': '模型独立安装并启动；连接测试不下载权重、不生成付费任务。语音和口型固定运行时尚不支持任意HTTP接口。'}
 

@@ -16,18 +16,18 @@ vi.mock('../components/ProjectCharacterReferences',()=>({ProjectCharacterReferen
 vi.mock('../components/SeedVrPreparation',()=>({SeedVrPreparation:()=>null}));
 
 const mocked=vi.mocked(request);
-const context={id:'local-context',name:'明确Context服务',module:'video_generation',provider:'comfyui',enabled:true,is_default:true,
-  default_model:'minimax_h3_w6a8',base_url:'http://127.0.0.1:8788',has_api_key:false,models:[],settings:{workflow_profile:'context_ir',h3_context_ir:true}};
-const provider={...context,id:'local-provider',name:'普通本地服务',settings:{workflow_profile:'provider',h3_context_ir:false}};
-const cloud={...context,id:'cloud',name:'云端视频服务',provider:'video_api',default_model:'minimax-h3',base_url:'https://example.invalid/v1',settings:{video_contract:'video-jobs-v1'}};
-let kind:'context'|'provider'|'cloud'|'mixed';
+const native={id:'local-native-h3',name:'本地 MiniMax H3',module:'video_generation',provider:'comfyui',enabled:true,is_default:true,
+  default_model:'minimax_h3_w6a8',base_url:'http://127.0.0.1:8189',has_api_key:false,models:[],settings:{workflow_profile:'native_h3_ref2va'}};
+const provider={...native,id:'local-provider',name:'普通本地服务',default_model:'other_video_model',settings:{workflow_profile:'provider'}};
+const cloud={...native,id:'cloud',name:'云端视频服务',provider:'video_api',default_model:'minimax-h3',base_url:'https://example.invalid/v1',settings:{video_contract:'video-jobs-v1'}};
+let kind:'native'|'provider'|'cloud'|'mixed';
 beforeEach(()=>{
-  kind='context';
+  kind='native';
   vi.mocked(useStudio).mockReturnValue({projectId:'p1',projects:[{id:'p1',name:'项目'}],data:{project:{id:'p1',name:'项目'},characters:[],scenes:[],
     shots:[{id:'s1',order:1,title:'测试镜头',duration_seconds:5,status:'draft',cast:[],decision:{}}],run:null},loading:false,error:'',listLoading:false,
     refresh:vi.fn(),refreshAfterChange:vi.fn(),refreshList:vi.fn(),selectProject:vi.fn()} as any);
   mocked.mockImplementation(async(url,init)=>{
-    const services=kind==='mixed'?[context,cloud]:[kind==='context'?context:kind==='provider'?provider:cloud];
+    const services=kind==='mixed'?[native,cloud]:[kind==='native'?native:kind==='provider'?provider:cloud];
     if(url==='/api/settings/ai-services?module=video_generation')return services;
     if(url==='/api/projects/p1/ai-services')return [];
     if(url==='/api/settings/ai-service-options')return {container:true};
@@ -52,7 +52,7 @@ it.each(['cloud','mixed'] as const)('keeps %s video routes usable in the main wo
   if(route==='mixed'){
     const mode=screen.getByLabelText('制作质量模式');await user.selectOptions(mode,'fast');
     expect(screen.getByTestId('h3-quality-route')).toHaveTextContent('4 步');
-    expect(screen.getByText(/三档采样只用于本地 Context-IR/)).toBeInTheDocument();
+    expect(screen.getByText(/本地 MiniMax H3 原生工作流/)).toBeInTheDocument();
   }else{
     expect(screen.queryByLabelText('制作质量模式')).toBeNull();
     expect(screen.queryByTestId('h3-quality-route')).toBeNull();
@@ -69,16 +69,16 @@ it.each(['cloud','mixed'] as const)('keeps %s video routes usable in the main wo
   expect(JSON.parse(String(sent[1]?.body))).toMatchObject({allow_cloud_costs:true,allow_paid_fallback:false,...(route==='mixed'?{quality:{mode:'fast'}}:{})});
 });
 
-it('keeps ordinary provider workflow parameters instead of labeling them Context-IR',async()=>{
+it('keeps ordinary provider workflow parameters separate from the native H3 route',async()=>{
   kind='provider';mount();
-  await screen.findByText(/当前使用服务档案中的普通本地工作流/);
+  await screen.findByText(/当前使用服务档案中的本地工作流/);
   expect(screen.queryByLabelText('制作质量模式')).toBeNull();
   expect(screen.queryByTestId('h3-quality-route')).toBeNull();
   await waitFor(()=>expect(screen.getByRole('button',{name:'开始／增量续作'})).toBeEnabled());
 });
 
-it('retains three verified Context-IR quality choices even when the model settings panel stays closed',async()=>{
-  kind='context';const user=userEvent.setup();mount();
+it('retains three verified native H3 quality choices even when the model settings panel stays closed',async()=>{
+  kind='native';const user=userEvent.setup();mount();
   const mode=await screen.findByLabelText('制作质量模式');
   await waitFor(()=>expect(mode).toBeEnabled());
   await user.selectOptions(mode,'fast');

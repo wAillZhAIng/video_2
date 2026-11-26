@@ -1,6 +1,6 @@
 # 发行验证记录
 
-公开仓库：[AI_Video_Creation](https://github.com/willzhang35929924-ui/AI_Video_Creation)。当前源码第一方许可以根目录 Apache-2.0 LICENSE 为准；第三方声明分别保留。各批次分开记录：Context-IR 便携化范围见 [本地节点与 Docker 更新验收](PORTABLE_LOCAL_ACCEPTANCE.md)，本次对白及导航更新见下节。历史记录保留 v0.1.0/v0.1.1 的实际复核，以 [Tags](https://github.com/willzhang35929924-ui/AI_Video_Creation/tags)、[Releases](https://github.com/willzhang35929924-ui/AI_Video_Creation/releases) 及关联 Actions 的实际结果为准。
+公开仓库：[AI_Video_Creation](https://github.com/willzhang35929924-ui/AI_Video_Creation)。当前源码第一方许可以根目录 Apache-2.0 LICENSE 为准；第三方声明分别保留。各批次分开记录：原生 H3 Ref2VA 便携化范围见 [本地节点与 Docker 更新验收](PORTABLE_LOCAL_ACCEPTANCE.md)，本次对白及导航更新见下节。历史记录保留 v0.1.0/v0.1.1 的实际复核，以 [Tags](https://github.com/willzhang35929924-ui/AI_Video_Creation/tags)、[Releases](https://github.com/willzhang35929924-ui/AI_Video_Creation/releases) 及关联 Actions 的实际结果为准。
 
 ## 2026-11-07：对白超长处理与导航调整
 

@@ -24,7 +24,7 @@ beforeEach(()=>{
       services=[...services,created];return created;
     }
     if(url==='/api/settings/ai-services')return services;
-    if(url==='/api/settings/ai-service-options')return {container:false,defaults:{comfyui:'http://127.0.0.1:8189',local_llm:'http://127.0.0.1:1234/v1',context_ir:'http://127.0.0.1:8788'},video_workflows:[]};
+    if(url==='/api/settings/ai-service-options')return {container:false,defaults:{comfyui:'http://127.0.0.1:8189',local_llm:'http://127.0.0.1:1234/v1'},video_workflows:[]};
     if(url==='/api/quality/capabilities')return {ai_super_resolution:{state:'not_configured'},seedvr2:{state:'not_configured'}};
     if(url==='/api/quality/profiles/system/default')return init?.method==='PUT'?{...profile,revision:3,settings:JSON.parse(String(init.body)).settings}:profile;
     throw new Error('Unexpected settings request: '+url);

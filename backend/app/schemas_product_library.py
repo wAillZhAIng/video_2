@@ -1,5 +1,6 @@
 from typing import Literal
 from pydantic import BaseModel,ConfigDict,Field,field_validator
+from app.schemas_cinematic import MotionReferenceInput
 
 Purpose=Literal['main','front','back','side','detail','usage','packaging','dimensions','other']
 class Strict(BaseModel):model_config=ConfigDict(extra='forbid')
@@ -45,7 +46,8 @@ class ProductSelection(Strict):
     image_ids:list[str]=Field(default_factory=list,max_length=8)
 class ProductionPreferenceEdit(Strict):
     expected_revision:int=Field(ge=0)
-    dialogue_audio_policy:Literal['auto','native','tts','skip']
+    dialogue_audio_policy:Literal['auto','native','tts','skip']|None=None
+    reference_video_defaults:list[MotionReferenceInput]|None=Field(default=None,max_length=3)
 class ShotProductReferenceEdit(Strict):
     product_id:str
     expected_revision:int=Field(ge=0)

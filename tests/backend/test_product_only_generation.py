@@ -1,6 +1,7 @@
-"""Product-only compiler/API regressions; provider is an explicit contract stub."""
+"""Product-only generation/API regressions; provider is an explicit contract stub."""
 import copy
 import hashlib
+import asyncio
 from types import SimpleNamespace
 
 from PIL import Image
@@ -49,7 +50,7 @@ def product_shot(settings):
     Base.metadata.create_all(engine)
     factory = build_session_factory(engine)
     with factory() as session:
-        project = m.Project(name='Product-only isolated compiler fixture')
+        project = m.Project(name='Product-only isolated generation fixture')
         session.add(project)
         session.flush()
         rules = rules_bundle()
@@ -200,17 +201,34 @@ def test_legacy_reference_video_accepts_approved_frame_with_product_images_clear
     assert 'the approved visual composition' in prompt
 
 
-def test_missing_product_ref_and_missing_participants_remain_blocked(product_shot):
+def test_missing_product_ref_and_missing_participants_do_not_restore_visual_input_gate(product_shot):
     p = product_shot
     p.session.delete(p.binding)
     p.session.flush()
     with pytest.raises(AppError) as error:
         generation_inputs(p.session, p.shot, p.settings)
     assert error.value.code == 'participants_required'
-    assert any(f['code'] == 'cast_not_ready' for f in shot_preflight(p.session, p.settings, p.shot, False)['findings'])
+    assert not any(f['code'] == 'cast_not_ready' for f in shot_preflight(p.session, p.settings, p.shot, False)['findings'])
     ir = {'characters': [], 'scenes': [], 'shots': [{'key': 'plain', 'participants': [], 'duration_seconds': 4}]}
     assert any(f['code'] == 'cast_unknown' for f in inspect_ir(ir)['findings'])
     assert 'products' not in visual_inputs(p.session, p.shot)
+
+
+def test_native_h3_allows_a_pure_script_without_visual_references(product_shot):
+    p = product_shot
+    p.session.delete(p.binding)
+    p.detail.source_json = {'production': {}}
+    p.session.flush()
+
+    version, references, script_prompt, prompt, negative, snapshot = routes._generation_inputs(
+        p.session, p.settings, p.shot, GenerationRequest(), None, None,
+        allow_no_visual_references=True,
+    )
+
+    assert version is None and references == []
+    assert script_prompt == prompt and negative == ''
+    assert snapshot['reference_manifest']['references'] == []
+    assert not any(f['code'] == 'cast_not_ready' for f in shot_preflight(p.session, p.settings, p.shot)['findings'])
 
 
 def test_changed_product_bytes_are_rejected_before_model_dispatch(product_shot):
@@ -279,9 +297,67 @@ def test_generation_entry_persists_null_character_version_and_product_manifest(p
     assert shots[0]['generation_ready'] is True and shots[0]['participants'] == []
 
 
+def test_single_shot_generation_resolves_saved_project_reference_video(product_shot, monkeypatch):
+    from app.services import providers, video_services
+
+    p = product_shot
+    source = p.settings.media_root / 'single-shot-reference.mp4'
+    source.write_bytes(b'project-scoped-reference-video')
+    sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    reference = m.ReferenceVideo(
+        id='single-shot-reference', name='Single-shot native reference', filename=source.name,
+        relative_path=source.name, sha256=sha, metadata_json={'duration_seconds': 8},
+        state='active', revision=1,
+    )
+    p.session.add_all([
+        reference,
+        m.ProjectReferenceVideo(project_id=p.project.id, video_id=reference.id),
+        m.ProjectProductionPreference(
+            id=p.project.id,
+            reference_video_defaults_json=[{
+                'video_id': reference.id,
+                'expected_revision': reference.revision,
+                'source_sha256': sha,
+                'trim_start_seconds': 0,
+                'trim_end_seconds': 4,
+                'authorized_for_reference': True,
+                'reference_role': 'action',
+                'include_audio': False,
+            }],
+        ),
+    ])
+    p.session.commit()
+
+    class NativeContractProvider(ContractProvider):
+        name = 'comfyui_h3'
+
+    provider = NativeContractProvider()
+    monkeypatch.setattr(video_services, 'select_video_service', lambda *args: (
+        None,
+        {'service_id': 'native-contract', 'model_id': 'minimax-h3', 'provider': 'comfyui',
+         'is_cloud': False, 'settings': {}},
+        provider,
+    ))
+    monkeypatch.setattr(providers, 'freeze_native_ref2va_workflow', lambda parameters: {
+        'workflow_name': 'h3-ref2va-native-fast4-v2', 'template_sha256': 'a' * 64,
+        'steps': 4, 'graph': {},
+    })
+    request = Request({'type': 'http', 'app': SimpleNamespace(state=SimpleNamespace(settings=p.settings))})
+
+    job, result = asyncio.run(routes.generate_for_shot(
+        request, p.session, p.shot,
+        GenerationRequest(parameters={'width': 1024, 'height': 576}),
+    ))
+
+    assert result is None and job.status == 'queued'
+    assert [item['video_id'] for item in job.parameters_json['motion_references']] == [reference.id]
+    assert [item['video_id'] for item in provider.requests[0].motion_references] == [reference.id]
+    assert '<Video 1>' in job.parameters_json['native_reference_constraints']
+
+
 @pytest.mark.parametrize('kind', ['cloud', 'native'])
-def test_direct_generation_respects_selected_legacy_profile_without_context_quality(product_shot, monkeypatch, kind):
-    from app.services import ai_services, context_production_inputs, providers, video_services
+def test_direct_generation_respects_selected_native_profile(product_shot, monkeypatch, kind):
+    from app.services import ai_services, providers, video_services
     p = product_shot
     provider = ContractProvider()
     if kind == 'native':
@@ -293,7 +369,7 @@ def test_direct_generation_respects_selected_legacy_profile_without_context_qual
         base_url='https://example.invalid/v1' if kind == 'cloud' else 'http://127.0.0.1:8189',
         default_model='contract-cloud-video' if kind == 'cloud' else 'minimax_h3_ref2va_pruned_w6a8.safetensors',
         settings_json=({'video_contract': 'video-jobs-v1'} if kind == 'cloud' else
-                       {'workflow_profile': 'native_h3_r2v', 'h3_context_ir': False}))
+                       {'workflow_profile': 'native_h3_r2v'}))
     p.session.add(service); p.session.commit()
     selected = []
     resolved = []
@@ -309,19 +385,13 @@ def test_direct_generation_respects_selected_legacy_profile_without_context_qual
         selected.append(kwargs)
         return service, ai_services.service_snapshot(service, model_id), provider
 
-    def forbidden_context(*_args, **_kwargs):
-        pytest.fail('A cloud or explicit ordinary native profile must not enter Context-IR quality/input compilation')
-
     monkeypatch.setattr(ai_services, 'resolve_service', resolve_profile)
     monkeypatch.setattr(video_services, 'select_video_service', select_contract)
     monkeypatch.setattr(routes, 'provider_for', lambda _settings: provider)
-    monkeypatch.setattr(context_production_inputs, 'quality_for_shot', forbidden_context)
-    monkeypatch.setattr(context_production_inputs, 'collect_context_inputs', forbidden_context)
-    monkeypatch.setattr(context_production_inputs, 'restore_context_inputs', forbidden_context)
     complete_prompt = ('Preserve the supplied product and its packaging. ' * 450).strip()
     original_bytes = p.path.read_bytes()
     request = Request({'type': 'http', 'app': SimpleNamespace(state=SimpleNamespace(settings=p.settings))})
-    # Deliberately omit legacy_production: direct API selection must dispatch
+    # Deliberately omit the internal orchestration override: direct API selection must dispatch
     # by the saved profile, not depend on an internal orchestration override.
     job, result = run_contract(routes.generate_for_shot(request, p.session, p.shot,
         GenerationRequest(service_id=service.id, model_id=service.default_model, prompt_override=complete_prompt,
@@ -334,7 +404,7 @@ def test_direct_generation_respects_selected_legacy_profile_without_context_qual
     assert submitted.prompt == job.prompt == complete_prompt
     assert job.parameters_json['prompt_override'] == complete_prompt
     assert job.parameters_json['compiled_prompt'] != complete_prompt
-    assert not {'h3_workflow', 'context_inputs', 'quality_request'} & job.parameters_json.keys()
+    assert job.parameters_json['native_reference_constraints'] == ''
     assert job.parameters_json['service_snapshot']['service_id'] == service.id
     assert job.parameters_json['service_snapshot']['settings'] == service.settings_json
     assert submitted.parameters['width'] == 1024 and submitted.parameters['height'] == 576
@@ -348,7 +418,7 @@ def test_direct_generation_respects_selected_legacy_profile_without_context_qual
     assert not p.session.scalar(select(func.count()).select_from(m.Character))
 
 
-def test_generate_approved_shots_native_h3_preflight_skips_context_ir_quality(product_shot, monkeypatch):
+def test_generate_approved_shots_uses_native_h3_direct_profile(product_shot, monkeypatch):
     from app.services import ai_services, video_services
 
     p = product_shot
@@ -358,7 +428,7 @@ def test_generate_approved_shots_native_h3_preflight_skips_context_ir_quality(pr
         'service_id': service_id,
         'model_id': model_id,
         'provider': 'comfyui',
-        'settings': {'workflow_profile': 'native_h3_r2v', 'h3_context_ir': False},
+        'settings': {'workflow_profile': 'native_h3_r2v'},
     }
     resolved = []
     selected = []

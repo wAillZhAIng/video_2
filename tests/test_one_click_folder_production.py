@@ -212,8 +212,8 @@ def test_batch_continues_after_failure_and_skips_already_dispatched(tmp_path: Pa
 
         def get(self, path: str):
             if path == "/api/health": return {"status": "ok"}
-            if path == "/api/providers/h3/context-health":
-                return {"provider": "comfyui_h3_context_ir", "mode": "real", "ready": True,
+            if path == "/api/providers/h3/health":
+                return {"provider": "comfyui_h3", "mode": "real", "ready": True,
                         "reference_to_video_available": True}
             if path == "/api/quality/capabilities":
                 return {"ai_plans": [{"requested": {"resolution": "4k", "aspect_ratio": "16:9"},

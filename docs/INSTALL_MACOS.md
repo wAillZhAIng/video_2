@@ -1,6 +1,6 @@
 # macOS 安装教程
 
-Mac 通过 Docker Desktop 运行网页、后台、SQLite、任务编排与 FFmpeg。本地 H3＋Context-IR＋4step LoRA 连接用户自己的 NVIDIA 推理主机；Windows CUDA 环境不能复制到 Mac 后直接运行。也可配置应用已支持的云端 API。
+Mac 通过 Docker Desktop 运行网页、后台、SQLite、任务编排与 FFmpeg。本地 MiniMax H3 Ref2VA＋4-step LoRA 连接用户自己的 NVIDIA 推理主机；Windows CUDA 环境不能复制到 Mac 后直接运行。也可配置应用已支持的云端 API。
 
 当前没有 Mac 物理设备上的完整验收，也没有 Linux GPU 节点真实生成验收。双架构构建、模拟 ARM64 运行和 Windows 实测均不能替代这些测试。实际范围见 [发布验收记录](RELEASE_VALIDATION.md)。
 
@@ -38,13 +38,13 @@ open http://127.0.0.1:8080
 
 ## 3. 连接自己的 NVIDIA 推理节点
 
-先在 Windows NVIDIA 主机按 [本地推理节点教程](local-inference.md) 安装模型、运行环境和项目节点，启动 **8788** 节点入口。当前原生安装器将 Linux 标为 `BLOCKED_UNVERIFIED_RUNTIME` 并阻止启动，Linux GPU 路线尚未完成独立验收。
+先在 Windows NVIDIA 主机按 [本地推理节点教程](local-inference.md) 安装模型、运行环境和项目节点，并启动受控的 ComfyUI origin。当前本地工具以 Windows NVIDIA 为基线；Linux GPU 路线尚未完成独立验收。
 
 在 Mac 的网页中：
 
 1. **系统设置 → 添加服务 → 视频生成 → 本地 / 私有 ComfyUI**。
-2. 内置工作流选 **Context-IR 三档：Fast 4 / Quality 20 / Quality 30**。
-3. 地址填写自有 GPU 主机的私网地址，例如 `http://192.168.1.20:8788`；勾选 **确认这是我管理的本地模型服务**，保存并测试连接。
+2. 内置工作流选 **MiniMax H3 原生 Ref2VA：Fast 4 / 标准 20 / 高质量 30**。
+3. 地址填写自有 GPU 主机实际可访问的 ComfyUI 私网 origin，例如 `http://192.168.1.20:8189`；勾选 **确认这是我管理的本地模型服务**，保存并测试连接。
 4. 项目选用该视频档案；制作画质选 Fast 4 步、标准 20 步或高质量 30 步，保存后启动新任务。
 
 这条设置路径无需编辑 `.env`。连接当前 Mac 自己已支持的宿主服务时可用 `host.docker.internal`；它不能代表另一台 NVIDIA 主机。在 GPU 节点的 `allowed_clients` 中加入已核对的 Mac/Docker 客户端精确私网 IP；若出现 403，在节点日志中核对 `client_ip`，按本地教程配置白名单。节点保持私有，不开放到公共互联网。
@@ -53,7 +53,7 @@ Mac Docker 不会获得 Windows CUDA、宿主 Apple Metal/MPS 或原生 Windows 
 
 ## 4. 云端 API 与第一条小样
 
-使用云端服务时，在服务档案按用途选择已实现的 API 协议、地址和模型，填写自己的密钥并测试。云端地址使用 HTTPS；语言模型的 `/v1/models` 或聊天接口不能替代视频生成接口。三档 Context-IR 路线属于本地 H3，不能仅换一个云端域名沿用。
+使用云端服务时，在服务档案按用途选择已实现的 API 协议、地址和模型，填写自己的密钥并测试。云端地址使用 HTTPS；语言模型的 `/v1/models` 或聊天接口不能替代视频生成接口。原生 H3 三档属于本地 ComfyUI 路线，不能仅换一个云端域名沿用。
 
 下载 [剧本模板.docx](templates/剧本模板.docx)，填写一条短镜头后在项目工作台导入并核对。人物与产品参考按需上传；声音要求使用实际支持的策略与授权素材。开始制作后等待真实返回，播放审核分镜，批准并合成 MP4，下载检查画面、声音和时长。
 

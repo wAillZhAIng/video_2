@@ -201,3 +201,50 @@ def test_every_business_resource_lists_edits_notes_and_deletes_only_selected(cli
             assert not path.exists(),relative
         else:
             assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest()==digest,relative
+
+
+def test_project_reference_video_grants_follow_their_project_or_video_owner(client):
+    """An explicit project grant is removable metadata, not a deletion blocker."""
+    with client.app.state.session_factory() as session:
+        project = m.Project(name='Reference link project')
+        survivor = m.Project(name='Reference link survivor')
+        video = m.ReferenceVideo(
+            name='Reference link source', filename='source.mp4', relative_path='',
+            sha256='a' * 64, metadata_json={'duration_seconds': 2},
+        )
+        session.add_all([project, survivor, video])
+        session.flush()
+        project_link = m.ProjectReferenceVideo(project_id=project.id, video_id=video.id)
+        session.add(project_link)
+        session.commit()
+        project_id, survivor_id, video_id, project_link_id = (
+            project.id, survivor.id, video.id, project_link.id,
+        )
+
+    plan, response = delete(client, 'projects', [project_id], mode='keep', cascade=True)
+    assert response.status_code == 200, response.text
+    assert not plan['blockers']
+    assert ('project_reference_videos', project_link_id) in {
+        (record['table'], record['id']) for record in plan['records']
+    }
+    with client.app.state.session_factory() as session:
+        assert session.get(m.Project, project_id) is None
+        assert session.get(m.ProjectReferenceVideo, project_link_id) is None
+        assert session.get(m.Project, survivor_id) is not None
+        assert session.get(m.ReferenceVideo, video_id) is not None
+
+        second_link = m.ProjectReferenceVideo(project_id=survivor_id, video_id=video_id)
+        session.add(second_link)
+        session.commit()
+        second_link_id = second_link.id
+
+    plan, response = delete(client, 'reference_videos', [video_id], mode='keep', cascade=True)
+    assert response.status_code == 200, response.text
+    assert not plan['blockers']
+    assert ('project_reference_videos', second_link_id) in {
+        (record['table'], record['id']) for record in plan['records']
+    }
+    with client.app.state.session_factory() as session:
+        assert session.get(m.ReferenceVideo, video_id) is None
+        assert session.get(m.ProjectReferenceVideo, second_link_id) is None
+        assert session.get(m.Project, survivor_id) is not None

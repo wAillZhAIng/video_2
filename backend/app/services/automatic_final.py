@@ -56,7 +56,7 @@ def export_target(script, shots, transition_values=None):
             'transitions':transitions}
 
 
-def preserve_native_speech(target, context_by_shot):
+def preserve_native_speech(target, native_speech_shot_ids=()):
     """Derive export policy without changing the frozen storyboard snapshot.
 
     H3 rounds requested durations to its legal frame grid. Cutting a native
@@ -65,14 +65,9 @@ def preserve_native_speech(target, context_by_shot):
     """
     result=deepcopy(target)
     preserved=[]
+    allowed=set(native_speech_shot_ids or ())
     for shot_id in target.get('shot_durations',{}):
-        inputs=(context_by_shot.get(shot_id) or {}).get('inputs') or {}
-        if inputs.get('audio_policy')!='native':continue
-        snapshot=inputs.get('screenplay_snapshot') or {}
-        spoken=any(isinstance(row.get('text'),str) and row['text'].strip() for row in snapshot.get('dialogues',[]))
-        group=any(row.get('kind')=='voice' and str(row.get('description')or'').strip()
-                  for row in snapshot.get('audio_events',[]))
-        if spoken or group:preserved.append(shot_id)
+        if shot_id in allowed:preserved.append(shot_id)
     if preserved:
         result.update(preserve_native_speech_shots=preserved,
             duration_policy='preserve_complete_native_speech_takes',

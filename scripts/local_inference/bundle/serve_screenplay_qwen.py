@@ -30,8 +30,9 @@ MIN_VISION_PIXELS=64*32*32
 MAX_VISION_PIXELS=128*32*32
 VRAM_PREFLIGHT=False
 SAFE_TEXT_SDPA=False
-# Enabled only by the fixed H3-IR wrapper, never by the screenplay/JSON paths.
-H3IR_PROSE_REPEAT_GUARD=False
+# This optional guard applies only to free-form screenplay prose.  Structured
+# JSON requests deliberately retain their normal deterministic decoding path.
+SCREENPLAY_PROSE_REPEAT_GUARD=False
 PROSE_OUTPUT_REPETITION_PENALTY=1.1
 PROSE_REPEAT_MIN_PERIOD=32
 PROSE_REPEAT_MAX_PERIOD=256
@@ -134,7 +135,7 @@ def health():
             'loaded':loaded,'busy':lock.locked() or retained_gpu_lease is not None or loaded,'offline':True,
             'inference_phase':inference_phase,'gpu_release_status':gpu_release_status,
             'gpu_memory':cuda_memory_snapshot(),'last_gpu_cleanup':last_gpu_cleanup,'max_model_len':MAX_CONTEXT_TOKENS,
-            'prose_repetition_policy':{'enabled':H3IR_PROSE_REPEAT_GUARD,'policy':'h3ir-output-repetition-v1',
+            'prose_repetition_policy':{'enabled':SCREENPLAY_PROSE_REPEAT_GUARD,'policy':'screenplay-output-repetition-v1',
                 'scope':'generated_tokens_only','output_repetition_penalty':PROSE_OUTPUT_REPETITION_PENALTY,
                 'eos_logits_exempt':True,'min_period_tokens':PROSE_REPEAT_MIN_PERIOD,
                 'max_period_tokens':PROSE_REPEAT_MAX_PERIOD,'required_adjacent_repetitions':PROSE_REPEAT_OCCURRENCES,
@@ -496,8 +497,8 @@ class RepeatedOutputGuard:
 
 
 def generation_prose_controls(body,model,prompt_tokens,*,existing_stopping=None):
-    enabled=H3IR_PROSE_REPEAT_GUARD and body.response_format is None
-    receipt={'enabled':bool(enabled),'policy':'h3ir-output-repetition-v1','scope':'generated_tokens_only'}
+    enabled=SCREENPLAY_PROSE_REPEAT_GUARD and body.response_format is None
+    receipt={'enabled':bool(enabled),'policy':'screenplay-output-repetition-v1','scope':'generated_tokens_only'}
     if not enabled:return {},receipt,None
     from transformers import LogitsProcessorList,StoppingCriteriaList
     eos=model.generation_config.eos_token_id

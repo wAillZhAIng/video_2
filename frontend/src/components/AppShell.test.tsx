@@ -76,19 +76,11 @@ describe("AppShell provider truth labels", () => {
     expect(screen.queryByRole('link',{name:'视频制作'})).not.toBeInTheDocument();
   });
 
-  it('shows a live queue when compiler health is temporarily withheld during work',async()=>{
+  it('shows a live queue when native H3 health is temporarily withheld during work',async()=>{
     vi.spyOn(api,'getContextProviderHealth').mockResolvedValue({ok:false,connected:true,ready:false,busy:true,mode:'real'});
     render(<MemoryRouter><AppShell><p>测试内容</p></AppShell></MemoryRouter>);
     expect(await screen.findByText('本地 H3 队列处理中')).toBeInTheDocument();
     expect(screen.queryByText('本地后端不可达')).not.toBeInTheDocument();
-  });
-
-  it('shows Qwen processing when the video compiler is waiting to use the GPU',async()=>{
-    vi.spyOn(api,'getContextProviderHealth').mockResolvedValue(
-      {ok:false,connected:true,ready:false,busy:true,busy_reason:'qwen',mode:'real'});
-    render(<MemoryRouter><AppShell><p>测试内容</p></AppShell></MemoryRouter>);
-    expect(await screen.findByText('本地 Qwen 处理中')).toBeInTheDocument();
-    expect(screen.queryByText('本地模型未就绪')).not.toBeInTheDocument();
   });
 
   it.each([['项目工作台','/'],['脚本与分镜','/storyboard']])('keeps the older current project when opening %s without carrying another module’s selection',async(label,path)=>{

@@ -147,7 +147,7 @@ try {
     expected_count = $plan.selected_count
     source_root = $scriptRoot
     workflow = [ordered]@{
-      route = 'local Context-IR'
+      route = 'native MiniMax H3 Ref2VA'
       model = 'MiniMax H3'
       workflow_name = 'H3 SMD4 Fast'
       mode = 'fast'
@@ -176,7 +176,7 @@ try {
   $batchManifestPath = Join-Path $manifestDir 'batch_40_manifest.json'
   [System.IO.File]::WriteAllText($assetManifestPath, ($assetManifest | ConvertTo-Json -Depth 40), $utf8)
   [System.IO.File]::WriteAllText($batchManifestPath, ($batchManifest | ConvertTo-Json -Depth 60), $utf8)
-  Write-Host "只读预检通过：$($plan.selected_count) 份脚本、全部 Context-IR 与超分能力已验证。"
+  Write-Host "只读预检通过：$($plan.selected_count) 份脚本、全部原生 MiniMax H3 与超分能力已验证。"
   Write-Host "脚本与产品图映射：$assetManifestPath"
   Write-Host "可恢复批次台账：$batchManifestPath"
 

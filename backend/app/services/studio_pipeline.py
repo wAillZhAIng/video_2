@@ -114,7 +114,7 @@ def _predecessor(nodes, entry):
                  if n['id'] == identifier and n.get('video_id')), None)
 
 
-def _append_media_nodes(session, shot, nodes, routes, quality, audio_policy='auto', *, context_video=False):
+def _append_media_nodes(session, shot, nodes, routes, quality, audio_policy='auto'):
     route = routes['dialogue_generation']
     lines = [line for line in session.scalars(select(m.DialogueLine).where(m.DialogueLine.shot_id == shot.id)
                                 .order_by(m.DialogueLine.order, m.DialogueLine.id)) if line.text.strip()]
@@ -122,7 +122,7 @@ def _append_media_nodes(session, shot, nodes, routes, quality, audio_policy='aut
     if lines and audio_policy not in {'native','skip'} and (_explicit_route(route) or route.get('selected')):
         tts_ids = []
         for line in lines:
-            entry = node('tts', line.id, [] if context_video else ['keyframe:' + shot.id])
+            entry = node('tts', line.id, ['keyframe:' + shot.id])
             entry.update(shot_id=shot.id, participant_id=line.participant_id, route=copy.deepcopy(route))
             nodes.append(entry); tts_ids.append(entry['id'])
         entry = node('audio_mix', shot.id, [previous, *tts_ids])
@@ -150,30 +150,22 @@ def _append_media_nodes(session, shot, nodes, routes, quality, audio_policy='aut
     nodes.append(entry)
 
 
-def wants_context_profile(settings, snapshot):
-    """Direct passthrough mode: always use the native R2V workflow, never Context-IR.
-
-    Context-IR added a 4B VLM compilation layer that blocked on SKU identity
-    mismatch and truncated long prompts at 4096 tokens. The direct workflow
-    sends the full visual_prompt straight to H3's 32B text encoder, matching
-    the Nomi architecture. Context-IR can be re-enabled per-service by setting
-    workflow_profile='context_ir' in the service snapshot.
-    """
-    if not snapshot or snapshot.get('provider') != 'comfyui':
-        return False
-    profile = snapshot.get('settings') or {}
-    # Only opt in when explicitly requested; never infer from platform/hostname.
-    return profile.get('workflow_profile') == 'context_ir'
-
-
 def create_pipeline(session, settings, project_id, options, *, prior_quality=None):
     """Persist the DAG in the caller's transaction; this function never calls AI."""
     get(session, m.Project, project_id)
     raw = options.model_dump() if hasattr(options, 'model_dump') else dict(options or {})
     provided = getattr(options, 'model_fields_set', set())
+    reference_defaults_explicit = ('reference_video_defaults' in provided if hasattr(options, 'model_fields_set')
+                                   else 'reference_video_defaults' in raw)
     explicit_canvas = raw.get('explicit_native_canvas') is True or {'width', 'height'}.issubset(provided)
     validated = PipelineStart.model_validate({k: raw[k] for k in PipelineStart.model_fields if k in raw})
     raw = {**raw, **validated.model_dump()}
+    # A project default is an explicit saved preference, never an implicit
+    # lookup of a library asset.  A caller can still send [] to opt out for a
+    # newly created run without changing the saved project preference.
+    if not reference_defaults_explicit:
+        from app.services.studio_audio_policy import get_preferences
+        raw['reference_video_defaults'] = get_preferences(session, project_id)['reference_video_defaults']
     # A completed production should emit a real, playable deliverable without
     # waiting for a second approval action.  Failed or incomplete nodes never
     # reach the automatic-render branch, so this does not assemble partial work.
@@ -183,7 +175,8 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
     shots = _shots(session, project_id, raw.get('shot_ids'))
     if not shots: raise AppError(409, 'studio_no_shots', '先导入或创建至少一个有效分镜')
     selected = [s.id for s in shots]
-    for field in ('prompt_overrides', 'reference_image_ids', 'motion_reference_overrides'):
+    for field in ('prompt_overrides', 'reference_image_ids', 'motion_reference_overrides',
+                  'shot_reference_video_overrides'):
         if set(raw[field]) - set(selected):
             raise AppError(422, 'studio_input_shot_scope', '本次提示词及临时素材必须属于选定项目镜头')
     from app.services.video_quality import inherited_settings, plan as quality_plan
@@ -213,9 +206,12 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
         if old.snapshot_json.get('shot_ids') == selected and not raw.get('force_shot_ids'):
             if raw.get('product_reference_plan') and raw.get('product_reference_plan') != old.snapshot_json.get('options',{}).get('product_reference_plan'):
                 raise AppError(409,'studio_active_product_plan_conflict','运行中的制作使用不同产品配置，请先暂停')
-            for field in ('prompt_overrides', 'reference_image_ids', 'motion_reference_overrides'):
+            for field in ('prompt_overrides', 'reference_image_ids', 'motion_reference_overrides',
+                          'shot_reference_video_overrides'):
                 if raw[field] and raw[field] != old.snapshot_json.get('options', {}).get(field, {}):
                     raise AppError(409, 'studio_active_input_conflict', '运行中的制作已经锁定输入，请先暂停后新建制作')
+            if raw.get('reference_video_defaults') != old.snapshot_json.get('options', {}).get('reference_video_defaults', []):
+                raise AppError(409, 'studio_active_input_conflict', '运行中的制作已经锁定参考视频默认值，请先暂停后新建制作')
             if explicit_canvas and any(generation_dimensions(old, shot) != (raw['width'], raw['height']) for shot in shots):
                 raise AppError(409, 'studio_active_input_conflict', '运行中的制作已经锁定生成尺寸，请先暂停后新建制作')
             return old  # double-click/repeated idempotent import cannot duplicate paid jobs
@@ -241,6 +237,41 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
             transitions = [(detail.photography_json or {}).get('transition') if detail else None
                 for detail in (production_context(session, shot)[0] for shot in shots[:-1])]
             automatic_final = export_target(script, shots, transitions)
+
+    # Freeze the native video sources before any child task is dispatched.
+    # Project defaults are used only when a shot has no explicit override;
+    # an empty per-shot list is a deliberate opt-out.  This records source
+    # IDs/revisions/hashes/ranges, never an absolute path or extracted frame.
+    from app.services.motion_references import resolve_motion_references
+    from app.services.native_reference_video import (public_references,
+                                                     references_fingerprint,
+                                                     require_project_reference_access)
+    reference_videos_by_shot, reference_video_fingerprints_by_shot = {}, {}
+    for shot in shots:
+        _, _, _, production, _ = production_context(session, shot)
+        if shot.id in raw.get('shot_reference_video_overrides', {}):
+            source_values = raw['shot_reference_video_overrides'][shot.id]
+        elif shot.id in raw.get('motion_reference_overrides', {}):
+            # Compatibility input from the older per-shot editor.  It is
+            # frozen under the new native-reference snapshot name.
+            source_values = raw['motion_reference_overrides'][shot.id]
+        elif isinstance(production.get('reference_video_overrides'), list):
+            source_values = production['reference_video_overrides']
+        elif isinstance(production.get('motion_references'), list):
+            # Existing explicit per-shot native-video choices remain valid
+            # during the field-name migration.  ProjectReferenceVideo access
+            # is still verified below, so this fallback never imports a
+            # source from another project.
+            source_values = production['motion_references']
+        else:
+            source_values = raw.get('reference_video_defaults', [])
+        resolved = resolve_motion_references(session, settings, shot, source_values)
+        require_project_reference_access(session, project_id, resolved)
+        if sum(float(item['effective_duration_seconds']) for item in resolved) > 15 + 1e-6:
+            raise AppError(422, 'reference_video_total_duration', '本镜原生参考视频总时长最多15秒，请缩短或移除部分片段')
+        frozen = public_references(resolved)
+        reference_videos_by_shot[shot.id] = frozen
+        reference_video_fingerprints_by_shot[shot.id] = references_fingerprint(frozen)
     from app.services.task_routing import SLOTS, freeze_route
     def freeze(shot_id=None):
         config = quality_by_shot.get(shot_id, {})
@@ -260,38 +291,8 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
         if config['processing'] == 'ai_super_resolution' and _explicit_route(route):
             _route_for_quality(session, route, QualitySettings.model_validate(config))
     snapshots, errors = _capture_services(session, project_id)
-    context_by_shot = {}
-    if not settings.h3_demo_mode:
-        from app.services.context_production_inputs import collect_context_inputs
-        from app.services.h3_workflow_router import native_megapixels
-        from app.services.video_services import select_video_service
-
-        for shot in shots:
-            route = routes_by_shot[shot.id]['video_generation']
-            selected_video = ((route.get('selected') or {}).get('service_snapshot')
-                              if _explicit_route(route) else snapshots.get('video'))
-            if not selected_video:
-                # Keep the existing actionable route/service error for Studio.
-                # This run cannot dispatch until a new configuration is selected.
-                continue
-            if not wants_context_profile(settings, selected_video):
-                continue
-            quality_by_shot.setdefault(shot.id, QualitySettings.model_validate(
-                {'mode': 'high', 'aspect_ratio': shot.aspect_ratio}).model_dump())
-            _, service_snapshot, _ = select_video_service(session, settings, project_id,
-                selected_video['service_id'], selected_video['model_id'], quality_mode=quality_by_shot[shot.id]['mode'])
-            if not service_snapshot.get('h3_workflow'):
-                raise AppError(409, 'context_workflow_required', '当前制作档位需要真实本地 Context-IR 工作流')
-            inputs = collect_context_inputs(session, settings, shot, prompt_override=raw['prompt_overrides'].get(shot.id),
-                instruction=raw.get('instructions', {}).get(shot.id), image_ids=raw['reference_image_ids'].get(shot.id),
-                motion_values=raw['motion_reference_overrides'].get(shot.id), audio_policy=raw['dialogue_audio_policy'])
-            context_by_shot[shot.id] = {'service': service_snapshot, 'inputs': inputs}
-            if explicit_canvas:
-                native_megapixels(shot.aspect_ratio, raw['width'], raw['height'])
-                context_by_shot[shot.id]['native_canvas'] = [raw['width'], raw['height']]
-    context_production = bool(context_by_shot)
     nodes, known, scene_ids = [], set(), {}
-    for shot in (shot for shot in shots if shot.id not in context_by_shot):
+    for shot in shots:
         for participant in session.scalars(select(m.ShotCharacter).where(m.ShotCharacter.shot_id == shot.id)):
             if participant.character_id not in known:
                 entry = node('character', participant.character_id)
@@ -305,18 +306,17 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
                 entry = node('scene', key); entry.update(scene_id=scene.id, entity_id=prod.get('scene_state_id'), route_shot_id=shot.id,
                     route=copy.deepcopy(routes_by_shot[shot.id]['keyframe_image'])); nodes.append(entry)
     for shot in shots:
-        context_video = shot.id in context_by_shot
-        if not context_video:
-            dependencies = ['character:'+p.character_id for p in session.scalars(select(m.ShotCharacter).where(m.ShotCharacter.shot_id == shot.id))]
-            if shot.id in scene_ids: dependencies.append('scene:'+scene_ids[shot.id])
-            entry = node('keyframe', shot.id, dependencies); entry.update(route=copy.deepcopy(routes_by_shot[shot.id]['keyframe_image'])); nodes.append(entry)
-        entry = node('video', shot.id, [] if context_video else ['keyframe:'+shot.id]); entry.update(route=copy.deepcopy(routes_by_shot[shot.id]['video_generation'])); nodes.append(entry)
-        _append_media_nodes(session, shot, nodes, routes_by_shot[shot.id], shot.id in quality_postprocess,raw['dialogue_audio_policy'],context_video=context_video)
+        dependencies = ['character:'+p.character_id for p in session.scalars(select(m.ShotCharacter).where(m.ShotCharacter.shot_id == shot.id))]
+        if shot.id in scene_ids: dependencies.append('scene:'+scene_ids[shot.id])
+        entry = node('keyframe', shot.id, dependencies); entry.update(route=copy.deepcopy(routes_by_shot[shot.id]['keyframe_image'])); nodes.append(entry)
+        entry = node('video', shot.id, ['keyframe:'+shot.id]); entry.update(route=copy.deepcopy(routes_by_shot[shot.id]['video_generation'])); nodes.append(entry)
+        _append_media_nodes(session, shot, nodes, routes_by_shot[shot.id], shot.id in quality_postprocess,raw['dialogue_audio_policy'])
     run = StudioRun(project_id=project_id, script_revision_id=script.id if script else None,
                     status='queued' if raw.get('auto_start', True) else 'paused', nodes_json=nodes,
                     snapshot_json={'options': raw, 'shot_ids': selected, 'services': snapshots, 'product_plan_result': product_plan_result,
                                    'service_errors': errors, 'routes': routes, 'routes_by_shot': routes_by_shot,
-                                    'context_production': context_production, 'h3_context_by_shot': context_by_shot,
+                                   'reference_videos_by_shot': reference_videos_by_shot,
+                                   'reference_video_fingerprints_by_shot': reference_video_fingerprints_by_shot,
                                     'automatic_final': automatic_final,
                                    'created_by': 'word automation' if raw.get('source') else 'studio start',
                                    'review_policy': ACCEPTANCE, 'resource_policy': {'local_gpu': 1, 'cloud': 1, 'note': 'conservative one actual task at a time; no throughput claim'}},
@@ -666,11 +666,7 @@ def _visual(session, settings, run, entry, dispatch):
 def _accept_inputs(session, settings, run, shot):
     _assert_shot_live(session, shot)
     detail, _, script, _, entities = production_context(session, shot)
-    context_video = shot.id in run.snapshot_json.get('h3_context_by_shot', {})
-    if context_video and not script:
-        from app.api.routes import script_for_shot
-        script = script_for_shot(session, shot)
-    if not script or (not detail and not context_video):
+    if not script or not detail:
         raise AppError(409, 'studio_structured_script_required', '镜头缺少可审核的本项目剧本')
     for entity in entities:
         if entity and entity.status != 'approved':
@@ -678,9 +674,9 @@ def _accept_inputs(session, settings, run, shot):
             _accept(session, 'production_entity', entity.id, entity.version)
     session.flush()
     options = run.snapshot_json['options']
-    pre = shot_preflight(session, settings, shot, require_visual=not context_video, context_inputs=context_video,
+    pre = shot_preflight(session, settings, shot, require_visual=True,
                          explicit_visual_ids=options.get('reference_image_ids', {}).get(shot.id),
-                         explicit_motion=options.get('motion_reference_overrides', {}).get(shot.id))
+                         explicit_motion=run.snapshot_json.get('reference_videos_by_shot', {}).get(shot.id, []))
     blockers = [f for f in pre['findings'] if f['severity'] == 'blocker']
     if blockers: raise AppError(409, 'studio_input_exception', '；'.join(f['message'] for f in blockers), {'findings': blockers})
     if detail:
@@ -701,10 +697,6 @@ def video_seed(run_id, shot_id, attempt):
     return int.from_bytes(hashlib.sha256(material).digest()[:8],'big') & 0x7fffffff
 
 def generation_dimensions(run,shot):
-    if shot:
-        canvas = run.snapshot_json.get('h3_context_by_shot', {}).get(shot.id, {}).get('native_canvas')
-        if canvas:
-            return tuple(canvas)
     config=run.snapshot_json['options'].get('quality_by_shot',{}).get(shot.id) if shot else None
     if config:
         from app.services.video_quality import plan
@@ -715,23 +707,12 @@ def generation_quality_parameters(run,shot):
     config=run.snapshot_json['options'].get('quality_by_shot',{}).get(shot.id)
     if not config:return {}
     from app.services.video_quality import plan
-    route=_route(run,'video_generation',shot.id)
-    snapshot=(route.get('selected') or {}).get('service_snapshot',{}) if _explicit_route(route) else run.snapshot_json.get('services',{}).get('video',{})
-    result={'quality_request':config}
-    context = run.snapshot_json.get('h3_context_by_shot', {}).get(shot.id)
-    if context:
-        result['steps'] = context['service']['h3_workflow']['actual_steps']
-    elif snapshot.get('provider')=='comfyui':
-        profile = snapshot.get('settings') or {}
-        native_h3 = (profile.get('workflow_profile') == 'native_h3_r2v'
-                     and profile.get('h3_context_ir') is not True)
-        if config.get('mode') == 'fast' and not native_h3:
-            raise AppError(409, 'studio_context_workflow_required', 'Fast 需要新建 Context-IR 制作；原编排的本机工作流保持其历史设置')
-        if native_h3:
-            result['steps'] = 4
-        else:
-            result['steps'] = 12 if config.get('mode') == 'preview' else plan(config)['generation']['steps']
-    return result
+    generation = plan(config)['generation']
+    # Fast/standard/high are distinct H3 sampler contracts (4/20/30), not a
+    # cosmetic post-processing flag.  The provider selects a matching native
+    # workflow and rejects an unavailable contract instead of silently using
+    # the 4-step graph for every setting.
+    return {'quality_request':config, 'steps':generation['steps']}
 
 
 def generation_parameters(run,shot):
@@ -869,36 +850,12 @@ def _media(session,settings,run,entry,dispatch):
     session.flush()
 
 
-_CONTEXT_DISPATCH_TIMEOUTS = {
-    'context_ir_qwen_starting': ('context_ir_qwen_unavailable',
-        '等待本地 Qwen 恢复超过 2 分钟。请启动或检查 8772 服务后重试本镜；视频未提交', 120),
-    'context_ir_comfy_starting': ('context_ir_comfy_unavailable',
-        '等待本地 Context-IR ComfyUI 就绪超过 5 分钟。请检查 8188 服务后重试本镜；视频未提交', 300),
-    'local_gpu_busy': ('context_ir_gpu_wait_timeout',
-        '等待本地 GPU 空闲超过 2 分钟。请检查 ComfyUI 队列及本地模型状态后重试本镜；视频未提交', 120),
-}
-
-
-def _defer_context_dispatch(entry, code, message, *, now=None):
-    """Wait for a verified no-submit condition without using a generation attempt."""
-    now = time.time() if now is None else now
-    wait = entry.get('context_dispatch_wait')
-    if not wait or wait.get('code') != code:
-        wait = {'since': now, 'code': code}
-    entry['context_dispatch_wait'] = wait
-    timeout_code, timeout_message, seconds = _CONTEXT_DISPATCH_TIMEOUTS[code]
-    if now - wait['since'] >= seconds:
-        entry.pop('retry_after', None)
-        _failure(entry, timeout_code, timeout_message)
-    else:
-        entry.update(status='retrying', retry_after=now + 5,
-                     code=code, error=message)
-
-
 async def _video(app, session, settings, run, entry, dispatch):
     shot = get(session, m.StoryboardShot, entry['target_id']); options = run.snapshot_json['options']
-    context_run = shot.id in run.snapshot_json.get('h3_context_by_shot', {})
-    context = run.snapshot_json.get('h3_context_by_shot', {}).get(shot.id)
+    from app.services.native_reference_video import references_fingerprint
+    frozen_references = run.snapshot_json.get('reference_videos_by_shot', {}).get(shot.id, [])
+    frozen_reference_fingerprint = run.snapshot_json.get('reference_video_fingerprints_by_shot', {}).get(
+        shot.id, references_fingerprint(frozen_references))
     _assert_shot_live(session, shot)
     if entry['status'] == 'dispatching' and not entry.get('child_id'):
         # A crash can happen after provider POST and before local ID persistence.
@@ -916,20 +873,6 @@ async def _video(app, session, settings, run, entry, dispatch):
             from app.services.jobs import recheck_cloud_duration_warning
             recheck_cloud_duration_warning(session,settings,preserved)
         if job.status in {'failed', 'cancelled', 'unknown', 'closed_unknown'}:
-            no_submit_code = job.error_code
-            if context and job.status == 'failed' and not job.provider_job_id and no_submit_code == 'context_ir_comfy_unavailable':
-                from app.core.config import PROJECT_ROOT
-                logdir = PROJECT_ROOT / 'logs' / 'jobs' / job.id
-                if logdir.is_dir() and not any((logdir / name).exists() for name in ('submitted_prompt.json', 'submission_response.json')):
-                    no_submit_code = 'context_ir_comfy_starting'
-            if context and job.status == 'failed' and not job.provider_job_id and no_submit_code in _CONTEXT_DISPATCH_TIMEOUTS:
-                # The final provider checks found a handoff or busy peer.
-                # Preserve the no-submit record and refund the dispatch attempt.
-                entry['history'] = [*entry['history'], {'child_id': job.id, 'code': job.error_code,
-                                                       'error': job.error_message, 'seed': job.seed}]
-                entry.update(child_id=None, attempts=max(0, entry['attempts']-1))
-                _defer_context_dispatch(entry, no_submit_code, job.error_message)
-                return
             retryable = job.status == 'failed' and (
                 job.error_code == 'provider_unavailable' or
                 job.error_code in {'comfyui_execution_failed', 'cloud_video_submit_failed'} and _temporary_failure(job.error_message))
@@ -939,30 +882,24 @@ async def _video(app, session, settings, run, entry, dispatch):
         expected_hash = frozen_generation_inputs_hash(job.parameters_json)
         if expected_hash and expected_hash != generation_inputs_hash(session, shot):
             raise AppError(409, 'studio_video_stale', '生成期间镜头内容已变化；真实旧视频已保留，请仅重生成当前镜头')
+        if job.parameters_json.get('reference_videos_fingerprint', references_fingerprint([])) != frozen_reference_fingerprint:
+            raise AppError(409, 'studio_reference_video_stale', '本镜任务的原生参考视频冻结快照不匹配；旧视频保留，请新建增量制作')
         _valid_video(session, settings, video)
         entry.update(status='succeeded', video_id=video.id, inputs_hash=generation_inputs_hash(session, shot))
         video.metadata_json = {**video.metadata_json, 'studio_scope': {'run_id': run.id, **ACCEPTANCE}}
         return
     _accept_inputs(session, settings, run, shot)
     current_hash = generation_inputs_hash(session, shot)
-    if context_run and not context:
-        _service(session, run, 'video', 'video_generation', shot.id)
-        raise AppError(409, 'studio_context_snapshot_missing', '本轮缺少冻结的 Context-IR 视频工作流，请新建制作')
     if shot.id not in options.get('force_shot_ids', []):
         for video in session.scalars(select(m.VideoRevision).where(m.VideoRevision.shot_id == shot.id, m.VideoRevision.review_status != 'rejected').order_by(m.VideoRevision.revision.desc())):
             if video.metadata_json.get('quality_render_id') or video.metadata_json.get('processing_task_id'):continue
             previous = session.get(m.GenerationJob, video.generation_job_id)
             if not previous:continue
-            if context:
-                from app.services.context_input_reuse import context_reuse_reason
-                reuse_reason=context_reuse_reason(previous.parameters_json.get('context_inputs', {}),context['inputs'])
-                if (previous.parameters_json.get('h3_workflow') != context['service']['h3_workflow'] or
-                        not reuse_reason):
-                    continue
-            elif not _matching_route_output(run,'video_generation',shot.id,{'service_snapshot':previous.parameters_json.get('service_snapshot',{})},previous.parameters_json,generation_parameters(run,shot)):continue
+            if not _matching_route_output(run,'video_generation',shot.id,{'service_snapshot':previous.parameters_json.get('service_snapshot',{})},previous.parameters_json,generation_parameters(run,shot)):continue
             actual = frozen_generation_inputs_hash(previous.parameters_json)
             instruction=str(options.get('instructions',{}).get(shot.id,'') or '').strip()
             if previous.parameters_json.get('prompt_override') != options.get('prompt_overrides',{}).get(shot.id):continue
+            if previous.parameters_json.get('reference_videos_fingerprint', references_fingerprint([])) != frozen_reference_fingerprint:continue
             if shot.id in options.get('quality_by_shot',{}):
                 width,height=generation_dimensions(run,shot);requested_params=generation_quality_parameters(run,shot)
                 if previous.parameters_json.get('width')!=width or previous.parameters_json.get('height')!=height or ('steps' in requested_params and previous.parameters_json.get('steps')!=requested_params['steps']):continue
@@ -972,69 +909,37 @@ async def _video(app, session, settings, run, entry, dispatch):
                     recheck_cloud_duration_warning(session,settings,video)
                 _valid_video(session, settings, video)
                 entry.update(status='succeeded', child_id=previous.id, video_id=video.id, reused=True, inputs_hash=current_hash)
-                if context:entry['context_reuse_reason']=reuse_reason
                 return
     if not dispatch: return
     if settings.h3_demo_mode: raise AppError(409, 'studio_real_service_required', '自动制作要求真实视频服务，未使用 Demo 替代')
-    if context:
-        snapshot = context['service']
-    else:
-        _, snapshot = _service(session, run, 'video', 'video_generation', shot.id)
+    _, snapshot = _service(session, run, 'video', 'video_generation', shot.id)
     route_parameters=generation_parameters(run,shot)
     width,height=route_parameters['width'],route_parameters['height']
     if snapshot['provider'] == 'comfyui' and (width % 32 or height % 32 or max(width, height) > 1344):
         raise AppError(422, 'local_video_dimensions', '本地 H3 宽高必须为32的倍数且不超过1344')
-    if context:
-        from app.services.h3_context_provider import check_context_ready
-
-        try:
-            from app.core.trusted_service_origins import is_loopback_service
-            profile = snapshot.get('settings') or {}
-            await check_context_ready(snapshot['base_url'], snapshot['h3_workflow'], profile,
-                                     runtime_required=settings.container_mode or not is_loopback_service(snapshot['base_url'])
-                                     or profile.get('h3_context_ir') is True or profile.get('workflow_profile') == 'context_ir')
-        except AppError as exc:
-            if exc.code not in _CONTEXT_DISPATCH_TIMEOUTS:
-                raise
-            _defer_context_dispatch(entry, exc.code, exc.message)
-            return
-        if entry.get('code') in _CONTEXT_DISPATCH_TIMEOUTS:
-            entry.update(code=None, error=None)
     attempt=entry['attempts']+1
-    retry_source = None
-    if context and entry['history']:
-        child_id = entry['history'][-1].get('child_id')
-        previous = session.get(m.GenerationJob, child_id) if child_id else None
-        if previous and previous.status in {'failed', 'cancelled'}:
-            if previous.parameters_json.get('h3_workflow') != snapshot['h3_workflow']:
-                raise AppError(409, 'studio_context_retry_scope_mismatch', '重试记录与本轮的固定工作流不匹配')
-            retry_source = previous
-    seed = retry_source.seed if retry_source else entry.get('seed') if context else None
-    frozen_retry = retry_source
-    if retry_source and retry_source.parameters_json.get('context_inputs', {}).get('fingerprint') != context['inputs']['fingerprint']:
-        frozen_retry = None  # Explicit input refresh keeps the run's model and seed but builds a new job snapshot.
     entry.pop('retry_after', None)
-    entry.update(status='dispatching', attempts=attempt, inputs_hash=current_hash, seed=seed if seed is not None else video_seed(run.id,shot.id,attempt))
+    entry.update(status='dispatching', attempts=attempt, inputs_hash=current_hash,
+                 seed=entry.get('seed') if entry.get('seed') is not None else video_seed(run.id,shot.id,attempt))
     _persist(session, run, run.nodes_json)  # node is the same dict as in current durable list
     from app.api.routes import generate_for_shot
     try:
         job, _ = await generate_for_shot(Request({'type': 'http', 'app': app}), session, shot,
             GenerationRequest(service_id=snapshot['service_id'], model_id=snapshot['model_id'], seed=entry['seed'], prompt_override=options.get('prompt_overrides',{}).get(shot.id),
             parameters={**route_parameters,'width': width, 'height': height, 'requested_mode': 'real', **generation_quality_parameters(run,shot),
+                        'reference_videos': copy.deepcopy(frozen_references),
+                        'reference_videos_fingerprint': frozen_reference_fingerprint,
                         'studio_run_id': run.id, 'studio_node_id': entry['id'],
                         'studio_route':copy.deepcopy(_route(run,'video_generation',shot.id)),
                         'studio_instruction_sha256':fingerprint({'instruction':str(options.get('instructions',{}).get(shot.id,'') or '').strip()}),
                          'studio_instruction_source':'StudioRun.snapshot_json.options.instructions; this shot only'}),
-            instruction=options.get('instructions', {}).get(shot.id), retry_count=retry_source.retry_count+1 if retry_source else 0,
-            frozen_job=frozen_retry, frozen_service=snapshot if context else None,
-            frozen_quality=options.get('quality_by_shot',{}).get(shot.id) if context else None,
-            frozen_context=context['inputs'] if context else None, legacy_production=not context_run)
+            instruction=options.get('instructions', {}).get(shot.id), retry_count=max(0,attempt-1),
+            frozen_service=snapshot)
     except Exception:
         candidates = list(session.scalars(select(m.GenerationJob).where(m.GenerationJob.shot_id == shot.id).order_by(m.GenerationJob.created_at.desc())))
         found = next((j for j in candidates if j.parameters_json.get('studio_run_id') == run.id and j.parameters_json.get('studio_node_id') == entry['id']), None)
         if found: entry['child_id'] = found.id
         raise
-    entry.pop('context_dispatch_wait', None)
     entry.update(child_id=job.id, status='running')
 
 
@@ -1121,7 +1026,8 @@ def _queue_automatic_render(session, settings, run, nodes, *, retry=False):
         service_id=service.id
     if target:
         from app.services.automatic_final import timeline_parameters, preserve_native_speech
-        target=preserve_native_speech(target,run.snapshot_json.get('h3_context_by_shot',{}))
+        native_speech_shots=run.snapshot_json.get('shot_ids', []) if run.snapshot_json.get('options',{}).get('dialogue_audio_policy') == 'native' else []
+        target=preserve_native_speech(target,native_speech_shots)
         _, service = resolve_service(session, 'final_assembly', service_id, run.project_id)
         tools = replace(settings, ffprobe_path=service['settings'].get('ffprobe_path') or settings.ffprobe_path)
         metadata = [probe(safe_media_path(settings.media_root, video.relative_path, must_exist=True), tools)
@@ -1211,7 +1117,6 @@ async def _advance_pipeline(app, settings, session, run):
     local_busy = _resource_busy(session, nodes)
     # Across projects, only one Studio child occupies the shared GPU/cloud slot.
     other_busy = any(_resource_busy(session, other.nodes_json) for other in session.scalars(select(StudioRun).where(StudioRun.id != run.id, StudioRun.status.not_in(list(RUN_TERMINAL)))))
-    context_waiting = False
     for entry in nodes:
         run.nodes_json = nodes
         if entry['status'] in TERMINAL: continue
@@ -1226,10 +1131,8 @@ async def _advance_pipeline(app, settings, session, run):
             entry['status'] = 'waiting_dependencies'; continue
         if entry['status']=='waiting_dependencies': entry['status']='pending'
         if entry['status'] == 'retrying' and entry.get('retry_after', 0) > time.time():
-            if entry['kind'] == 'video' and entry.get('code') in _CONTEXT_DISPATCH_TIMEOUTS:
-                context_waiting = True
             continue
-        dispatch = not local_busy and not other_busy and not (context_waiting and entry['kind'] == 'video')
+        dispatch = not local_busy and not other_busy
         try:
             if entry['kind'] == 'character': _character(session, settings, run, entry, dispatch)
             elif entry['kind'] in {'scene', 'keyframe'}: _visual(session, settings, run, entry, dispatch)
@@ -1251,8 +1154,6 @@ async def _advance_pipeline(app, settings, session, run):
                 _failure(entry, 'studio_dispatch_unknown', '提交时发生意外，供应商结果未知；未自动重试', unknown=True)
             else: _failure(entry, 'studio_internal_error', type(exc).__name__+'：请检查后台日志后重试异常')
         session.flush()
-        if entry['kind'] == 'video' and entry['status'] == 'retrying' and entry.get('code') in _CONTEXT_DISPATCH_TIMEOUTS:
-            context_waiting = True
         local_busy = _resource_busy(session, nodes)
         # Pause is requested through another HTTP transaction while an actual
         # provider POST may be in flight. Respect that persisted control before

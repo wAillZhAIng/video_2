@@ -80,10 +80,8 @@ def _ancestry(session, current, *, include_audio_scope=False):
             raise AppError(409, 'revision_processing_scope', '原版本生成任务归属不匹配，未猜测配音来源')
         based = (job.parameters_json or {}).get('based_on_video_id')
         if based:
-            context = (job.parameters_json or {}).get('context_inputs') or {}
             original_plan = (job.parameters_json or {}).get(KEY)
             boundary = (requests_audio_change((job.parameters_json or {}).get('instruction'))
-                        or context.get('audio_policy') in {'skip', 'native'}
                         or bool(original_plan and original_plan.get('inputs', {}).get('audio') is None))
             # A new explicit mix belonging to this generation can be reused;
             # only crossing into an older take is blocked by its audio intent.

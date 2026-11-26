@@ -128,7 +128,7 @@ def _current(session, settings, project_id, node_id, expected_run_id=None):
         m.StudioDecision.project_id == project_id, m.StudioDecision.shot_id == shot.id))
     context['source_fingerprint'] = fingerprint({'version': VERSION, **context, 'mix_task': task.id,
         'generation_inputs_hash': generation_inputs_hash(session, shot),
-        'frozen_context': run.snapshot_json.get('h3_context_by_shot', {}).get(shot.id),
+        'frozen_native_references': run.snapshot_json.get('reference_videos_by_shot', {}).get(shot.id),
         'frozen_services': run.snapshot_json.get('services'),
         'frozen_routes': run.snapshot_json.get('routes'),
         'frozen_shot_routes': run.snapshot_json.get('routes_by_shot', {}).get(shot.id),
@@ -182,12 +182,6 @@ def _plan(session, settings, project_id, node_id, payload):
         target = payload.target_duration_seconds
         if target is None or target < context['audio_duration_seconds'] or target <= context['video']['duration_seconds']:
             raise AppError(422, 'audio_resolution_target_duration', '新镜头时长必须长于原片且容纳全部配音')
-        context_shot = run.snapshot_json.get('h3_context_by_shot', {}).get(shot.id)
-        if context_shot:
-            from app.services.context_production_inputs import restore_context_inputs
-            # Validate before changing duration/revision. Collecting a new
-            # snapshot alone would silently absorb changed identity/SKU inputs.
-            restore_context_inputs(session, settings, shot, context_shot['inputs'])
         selected = ((run.snapshot_json.get('routes_by_shot', {}).get(shot.id, {}).get('video_generation', {}).get('selected')
                     or run.snapshot_json.get('routes', {}).get('video_generation', {}).get('selected') or {})
                     .get('service_snapshot') or run.snapshot_json.get('services', {}).get('video', {}))
@@ -297,14 +291,6 @@ def apply(session, settings, project_id, node_id, payload):
         shot.revision += 1
         session.flush()
         frozen = copy.deepcopy(run.snapshot_json)
-        context_shot = frozen.get('h3_context_by_shot', {}).get(shot.id)
-        if context_shot:
-            from app.services.context_production_inputs import collect_context_inputs
-            old = context_shot['inputs']
-            context_shot['inputs'] = collect_context_inputs(session, settings, shot,
-                prompt_override=old.get('prompt_override'), instruction=old.get('instruction'),
-                image_ids=old.get('explicit_visual_ids'), motion_values=old.get('explicit_motion'),
-                audio_policy=old.get('audio_policy'))
         options = frozen.setdefault('options', {})
         options['force_shot_ids'] = sorted(set(options.get('force_shot_ids', [])) | {shot.id})
         run.snapshot_json = frozen
@@ -340,7 +326,7 @@ def apply(session, settings, project_id, node_id, payload):
         entry['history'] = [*entry.get('history', []), {'reason': 'audio_duration_resolution',
             'request_id': payload.client_request_id, 'action': payload.action,
             'previous': copy.deepcopy({k: v for k, v in entry.items() if k != 'history'})}]
-        for key in ('video_id', 'audio_id', 'source_video_id', 'retry_after', 'context_dispatch_wait', 'reused'):
+        for key in ('video_id', 'audio_id', 'source_video_id', 'retry_after', 'reused'):
             entry.pop(key, None)
         entry.update(status='pending', child_id=None, attempts=0, error=None, code=None)
     run.nodes_json = nodes

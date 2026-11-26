@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from app import models as m
+from app.core.db import Base, build_engine, build_session_factory
 from app.core.errors import AppError
 from app.schemas_cinematic import MotionReferenceInput
 from app.services.motion_references import resolve_motion_references, motion_live_state,verify_motion_sources
@@ -30,24 +31,102 @@ def test_input_video_preview_is_not_a_generated_video():
     assert video_outputs(history)==[{'filename':'generated.mp4','type':'output'}]
 
 
-def test_motion_source_revision_hash_and_bounds_are_checked(client, settings):
+def test_motion_source_revision_hash_and_bounds_are_checked(settings):
     media=Path(settings.media_root); media.mkdir(parents=True,exist_ok=True)
     source=media/'original.mp4'; source.write_bytes(b'source-video')
     sha=hashlib.sha256(source.read_bytes()).hexdigest()
     ref={'video_id':'refvideo_test','expected_revision':1,'source_sha256':sha,
          'trim_start_seconds':0,'trim_end_seconds':3,'authorized_for_motion':True}
-    shot=SimpleNamespace(duration_seconds=5)
-    with client.app.state.session_factory() as session:
-        video=m.ReferenceVideo(id='refvideo_test',name='reference',filename='original.mp4',relative_path='original.mp4',
-            sha256=sha,metadata_json={'duration_seconds':6},state='active',revision=1)
-        session.add(video);session.flush()
-        resolved=resolve_motion_references(session,settings,shot,[ref])
-        assert resolved[0]['effective_frames']==56 and resolved[0]['audio_included'] is False
-        assert motion_live_state(session,[ref])[0]['revision']==1
-        video.revision=2;session.flush()
-        with pytest.raises(AppError,match='变化'):resolve_motion_references(session,settings,shot,[ref])
-        video.revision=1;session.flush();source.write_bytes(b'changed')
-        with pytest.raises(AppError,match='哈希'):verify_motion_sources(resolve_motion_references(session,settings,shot,[ref]))
+    shot=SimpleNamespace(project_id='motion-project', duration_seconds=5)
+    engine=build_engine(settings.database_url); Base.metadata.create_all(engine)
+    try:
+        with build_session_factory(engine)() as session:
+            session.add(m.Project(id='motion-project', name='motion reference scope'))
+            video=m.ReferenceVideo(id='refvideo_test',name='reference',filename='original.mp4',relative_path='original.mp4',
+                sha256=sha,metadata_json={'duration_seconds':6},state='active',revision=1)
+            session.add(video);session.flush()
+            with pytest.raises(AppError) as denied:
+                resolve_motion_references(session,settings,shot,[ref])
+            assert denied.value.code=='reference_video_project_scope'
+            session.add(m.ProjectReferenceVideo(project_id='motion-project',video_id=video.id));session.flush()
+            resolved=resolve_motion_references(session,settings,shot,[ref])
+            assert resolved[0]['effective_frames']==72 and resolved[0]['audio_included'] is False
+            assert motion_live_state(session,[ref])[0]['revision']==1
+            video.revision=2;session.flush()
+            with pytest.raises(AppError,match='变化'):resolve_motion_references(session,settings,shot,[ref])
+            video.revision=1;session.flush();source.write_bytes(b'changed')
+            with pytest.raises(AppError,match='哈希'):verify_motion_sources(resolve_motion_references(session,settings,shot,[ref]))
+    finally:
+        engine.dispose()
+
+
+def test_native_reference_snapshot_preserves_explicit_authorization_round_trip(settings):
+    from app.services.native_reference_video import public_references
+
+    media = Path(settings.media_root); media.mkdir(parents=True, exist_ok=True)
+    source = media / 'native-reference.mp4'; source.write_bytes(b'approved native reference')
+    sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    engine = build_engine(settings.database_url); Base.metadata.create_all(engine)
+    try:
+        with build_session_factory(engine)() as session:
+            session.add(m.Project(id='native-project', name='native reference scope'))
+            session.add(m.ReferenceVideo(id='native-video', name='reference', filename=source.name,
+                relative_path=source.name, sha256=sha, metadata_json={'duration_seconds': 8},
+                state='active', revision=1))
+            session.flush()
+            session.add(m.ProjectReferenceVideo(project_id='native-project', video_id='native-video'))
+            session.flush()
+            binding = {
+                'video_id': 'native-video', 'expected_revision': 1, 'source_sha256': sha,
+                'trim_start_seconds': 1, 'trim_end_seconds': 5,
+                'authorized_for_reference': True, 'reference_role': 'camera', 'include_audio': False,
+            }
+            first = resolve_motion_references(session, settings,
+                SimpleNamespace(project_id='native-project', duration_seconds=5), [binding])
+            frozen = public_references(first)
+            assert frozen == [{
+                'video_id': 'native-video', 'expected_revision': 1, 'source_sha256': sha,
+                'trim_start_seconds': 1.0, 'trim_end_seconds': 5.0,
+                'authorized_for_motion': False, 'authorized_for_reference': True,
+                'reference_role': 'camera', 'include_audio': False,
+                'effective_frames': 96, 'effective_duration_seconds': 4.0,
+                'source_duration_seconds': 8, 'fps': 24, 'audio_included': False,
+            }]
+            round_trip = resolve_motion_references(session, settings,
+                SimpleNamespace(project_id='native-project', duration_seconds=5), frozen)
+            assert round_trip[0]['authorized_for_reference'] is True
+            assert round_trip[0]['reference_role'] == 'camera'
+    finally:
+        engine.dispose()
+
+
+def test_native_reference_total_duration_is_bounded_for_direct_submission(settings):
+    media = Path(settings.media_root); media.mkdir(parents=True, exist_ok=True)
+    engine = build_engine(settings.database_url); Base.metadata.create_all(engine)
+    try:
+        with build_session_factory(engine)() as session:
+            session.add(m.Project(id='duration-project', name='duration scope'))
+            session.flush()
+            refs = []
+            for index in range(2):
+                source = media / f'duration-{index}.mp4'; source.write_bytes(f'video-{index}'.encode())
+                sha = hashlib.sha256(source.read_bytes()).hexdigest()
+                identifier = f'duration-video-{index}'
+                session.add(m.ReferenceVideo(id=identifier, name=identifier, filename=source.name,
+                    relative_path=source.name, sha256=sha, metadata_json={'duration_seconds': 10},
+                    state='active', revision=1))
+                session.flush()
+                session.add(m.ProjectReferenceVideo(project_id='duration-project', video_id=identifier))
+                refs.append({'video_id': identifier, 'expected_revision': 1, 'source_sha256': sha,
+                             'trim_start_seconds': 0, 'trim_end_seconds': 8,
+                             'authorized_for_reference': True})
+            session.flush()
+            with pytest.raises(AppError) as rejected:
+                resolve_motion_references(session, settings,
+                    SimpleNamespace(project_id='duration-project', duration_seconds=5), refs)
+            assert rejected.value.code == 'motion_reference_total_duration'
+    finally:
+        engine.dispose()
 
 
 def test_in_use_motion_video_cannot_be_edited_or_archived(client,settings):
@@ -74,7 +153,8 @@ def test_shot_binding_saves_explicit_scope_and_changed_source_blocks_preflight(c
     sha=hashlib.sha256(source.read_bytes()).hexdigest()
     with client.app.state.session_factory() as session:
         session.add(m.ReferenceVideo(id='motion-video',name='video',filename='motion-source.mp4',relative_path=source.name,
-            sha256=sha,metadata_json={'duration_seconds':6},state='active',revision=1));session.commit()
+            sha256=sha,metadata_json={'duration_seconds':6},state='active',revision=1));session.flush()
+        session.add(m.ProjectReferenceVideo(project_id=result['project_id'],video_id='motion-video'));session.commit()
     overview=client.get('/api/projects/'+result['project_id']+'/production').json()
     item=overview['shots'][0]
     ref={'video_id':'motion-video','expected_revision':1,'source_sha256':sha,'trim_start_seconds':0,
@@ -88,10 +168,11 @@ def test_shot_binding_saves_explicit_scope_and_changed_source_blocks_preflight(c
     legacy['expected_input_hash']=updated['preflight']['generation_inputs_hash']
     response=client.put('/api/shots/'+item['shot']['id']+'/production',json=legacy)
     assert response.status_code==200,response.text
-    # New role/target bindings are optional. A legacy edit must retain every
-    # supplied motion field and leave the two new bindings explicitly unset.
+    # New native reference controls are persisted deterministically even for a
+    # legacy edit, so a frozen task can reproduce its role and audio policy.
     assert response.json()['source_json']['production']['motion_references']==[
-        {**ref, 'reference_role': None, 'target_character_id': None}]
+        {**ref, 'authorized_for_reference': False, 'reference_role': 'combined',
+         'include_audio': False, 'target_character_id': None}]
     assert client.delete('/api/reference-videos/motion-video?revision=1').status_code==409
     with client.app.state.session_factory() as session:
         video=session.get(m.ReferenceVideo,'motion-video');video.revision=2;session.commit()
@@ -179,7 +260,7 @@ def test_studio_closed_unknown_child_stays_blocked_without_resubmission(client,s
 
 
 @pytest.mark.parametrize('prompt_status',[200,408])
-def test_motion_native_graph_uploads_reference_and_never_uploads_audio(client, settings, tmp_path, monkeypatch,prompt_status):
+def test_motion_native_graph_uploads_reference_and_never_uploads_audio(settings, tmp_path, monkeypatch,prompt_status):
     import app.services.providers as providers
     import app.services.motion_references as motion
     workflow=Path(__file__).resolve().parents[2]/'workflows/h3_r2v_character_v1.json'
@@ -221,6 +302,7 @@ def test_motion_native_graph_uploads_reference_and_never_uploads_audio(client, s
     else:
         accepted=asyncio.run(ComfyUIH3Provider(config).submit(request))
         assert accepted.provider_job_id=='actual-provider-id'
+        assert accepted.metadata['workflow']=='h3-ref2va-native-fast4-v2'
     graph=sent['graph'];target=graph['136']['inputs']
     assert target['ref_videos.ref_video_0']==['factory_motion_components_0',0]
     assert graph['factory_motion_components_0']['inputs']['video']==['factory_motion_load_0',0]
@@ -230,3 +312,47 @@ def test_motion_native_graph_uploads_reference_and_never_uploads_audio(client, s
     assert client_origins and all(origins == [config.comfyui_base_url] for origins in client_origins)
     assert manifest['motion_reference_uploads'][0]['processed']['sha256']==video_sha
     assert manifest['motion_reference_uploads'][0]['audio_included'] is False
+
+
+def test_motion_native_graph_maps_explicit_audio_to_its_matching_video(settings, tmp_path, monkeypatch):
+    import app.services.providers as providers
+    import app.services.motion_references as motion
+    workflow=Path(__file__).resolve().parents[2]/'workflows/h3_r2v_character_v1.json'
+    config=replace(settings,h3_demo_mode=False,h3_workflow_api_json=workflow,comfyui_base_url='http://localhost:8189')
+    image=tmp_path/'reference.png';image.write_bytes(b'image-bytes')
+    video=b'processed-video-with-audio'; video_sha=hashlib.sha256(video).hexdigest()
+    ref={'video_id':'refvideo_audio','source_sha256':'a'*64,'expected_revision':1,'trim_start_seconds':0,
+         'trim_end_seconds':3,'effective_frames':72,'effective_duration_seconds':3,'include_audio':True}
+    monkeypatch.setattr(motion,'prepare_motion_reference',lambda _settings,_ref:(video,{'sha256':video_sha,'bytes':len(video),'frames':72,'fps':24,'audio_included':True}))
+    monkeypatch.setattr(providers,'PROJECT_ROOT',tmp_path)
+    sent={}
+    def handler(req):
+        if req.url.path=='/object_info':
+            return httpx.Response(200,json={'LoadVideo':{'input':{'required':{'file':['COMBO']}},'output':['VIDEO']},
+                'GetVideoComponents':{'input':{'required':{'video':['VIDEO']}},'output':['IMAGE','AUDIO']},
+                'MiniMaxH3ReferenceToVideo':{'input':{'optional':{
+                    'ref_videos':['COMFY_AUTOGROW_V3',{'template':{'input':{'required':{'ref_video':['IMAGE']}},'prefix':'ref_video_','max':3}}],
+                    'ref_video_audios':['COMFY_AUTOGROW_V3',{'template':{'input':{'required':{'ref_video_audio':['AUDIO']}},'prefix':'ref_video_audio_','max':3}}]}}}})
+        if req.url.path=='/upload/image':
+            filename=re.search(b'filename="([^"]+)"',req.content).group(1).decode()
+            return httpx.Response(200,json={'name':filename,'subfolder':'','type':'input'})
+        if req.url.path=='/view':return httpx.Response(200,content=video)
+        if req.url.path=='/prompt':
+            sent['graph']=json.loads(req.content)['prompt']
+            return httpx.Response(200,json={'prompt_id':'audio-provider-id'})
+        return httpx.Response(404)
+    original=httpx.AsyncClient;transport=httpx.MockTransport(handler)
+    monkeypatch.setattr(providers,'local_service_client',lambda origins,**kwargs:original(transport=transport,trust_env=False,follow_redirects=False,**kwargs))
+    request=VideoGenerationRequest(job_id='audio-job',project_id='test-project',shot_id='test-shot',prompt='use <Video 1>',
+        negative_prompt='',duration_seconds=5,aspect_ratio='16:9',seed=42,parameters={},
+        reference_assets=[{'absolute_path':str(image),'sha256':hashlib.sha256(image.read_bytes()).hexdigest(),'asset_id':'image'}],
+        output_dir=tmp_path/'output',motion_references=[ref])
+    accepted=asyncio.run(ComfyUIH3Provider(config).submit(request))
+    assert accepted.provider_job_id=='audio-provider-id'
+    assert accepted.metadata['workflow']=='h3-ref2va-native-fast4-v2'
+    target=sent['graph']['136']['inputs']
+    assert target['ref_videos.ref_video_0']==['factory_motion_components_0',0]
+    assert target['ref_video_audios.ref_video_audio_0']==['factory_motion_components_0',1]
+    manifest=json.loads((tmp_path/'logs/jobs/audio-job/reference_manifest.json').read_text('utf-8'))
+    assert manifest['motion_reference_uploads'][0]['audio_included'] is True
+    assert manifest['motion_reference_uploads'][0]['audio_workflow_slot']=='ref_video_audios.ref_video_audio_0'

@@ -24,6 +24,171 @@ from app.services.gpu_gate import gpu_submission
 _motion_preprocess_locks=weakref.WeakKeyDictionary()
 
 
+# Each supported production tier is an independently pinned native Ref2VA
+# graph.  Do not mutate a four-step SMD graph into a quality graph at runtime:
+# its LoRA, sampler and sigma schedule are a different recipe.
+_NATIVE_REF2VA_WORKFLOWS = {
+    4: "h3_ref2va_native_fast4_v2.json",
+    20: "h3_ref2va_native_quality20_v2.json",
+    30: "h3_ref2va_native_quality30_v2.json",
+}
+_NATIVE_REF2VA_WORKFLOW_ROOT = Path(__file__).resolve().parents[3] / "workflows"
+_NATIVE_WORKFLOW_SNAPSHOT_KEY = "native_ref2va_workflow"
+
+
+def native_ref2va_workflow_path(parameters: dict[str, Any] | None = None) -> Path:
+    """Return the independently audited native graph for the requested tier.
+
+    The app deliberately supports only the three public production tiers.  A
+    request for another step count must not silently change a frozen sampler
+    recipe or fall back to Fast 4-Step.
+    """
+    if parameters is not None and not isinstance(parameters, dict):
+        raise AppError(422, "native_ref2va_quality_invalid", "原生 MiniMax H3 的画质参数无效")
+    value = (parameters or {}).get("steps", 4)
+    try:
+        steps = int(value)
+        if isinstance(value, bool) or (isinstance(value, float) and value != steps):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AppError(422, "native_ref2va_quality_invalid", "原生 MiniMax H3 仅支持 Fast 4-Step、标准 20-Step 或高质量 30-Step") from exc
+    filename = _NATIVE_REF2VA_WORKFLOWS.get(steps)
+    if filename is None:
+        raise AppError(422, "native_ref2va_quality_invalid", "原生 MiniMax H3 仅支持 Fast 4-Step、标准 20-Step 或高质量 30-Step", {"steps": steps})
+    # Job logs deliberately follow PROJECT_ROOT and tests may redirect it; the
+    # shipped workflow assets must continue to resolve from this module.
+    path = _NATIVE_REF2VA_WORKFLOW_ROOT / filename
+    if not path.is_file():
+        raise AppError(503, "native_ref2va_workflow_missing", "原生 MiniMax H3 工作流文件缺失，未降级到其他工作流", {"steps": steps, "workflow": filename})
+    return path
+
+
+def _workflow_document_hash(document: dict[str, Any]) -> str:
+    """Hash a parsed graph canonically, independent of source-file whitespace."""
+    return hashlib.sha256(json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _read_workflow_document(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AppError(503, "h3_workflow_not_found", "H3 API 工作流文件不存在") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AppError(503, "h3_workflow_invalid", "H3 API 工作流文件无法读取") from exc
+    if not isinstance(payload, dict):
+        raise AppError(503, "h3_workflow_invalid", "H3 API 工作流必须是 JSON 对象")
+    return payload
+
+
+def _validate_workflow_document(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    metadata = payload.get("_video_factory")
+    prompt = payload.get("prompt")
+    if not isinstance(metadata, dict) or not isinstance(prompt, dict):
+        raise AppError(
+            503,
+            "h3_workflow_unverified",
+            "工作流必须包含 _video_factory 映射和 ComfyUI API prompt 图；不会猜测节点输入",
+        )
+    prompt_path = metadata.get("prompt_path")
+    if not isinstance(prompt_path, list) or not prompt_path:
+        raise AppError(503, "h3_workflow_unverified", "工作流缺少 prompt_path 映射")
+    if not all(isinstance(node, dict) and "class_type" in node for node in prompt.values()):
+        raise AppError(503, "h3_workflow_invalid", "prompt 不是 ComfyUI API 格式节点图")
+    validate_sampling_contract(prompt, metadata)
+    return prompt, metadata
+
+
+def freeze_native_ref2va_workflow(parameters: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Freeze the exact audited graph into a task-owned, replayable snapshot."""
+    path = native_ref2va_workflow_path(parameters)
+    document = _read_workflow_document(path)
+    _prompt, metadata = _validate_workflow_document(document)
+    steps = int((parameters or {}).get("steps", 4))
+    return {
+        "version": 1,
+        "steps": steps,
+        "workflow_name": str(metadata.get("name") or ""),
+        "template_sha256": _workflow_document_hash(document),
+        "document": copy.deepcopy(document),
+    }
+
+
+def _frozen_native_ref2va_document(parameters: dict[str, Any]) -> dict[str, Any] | None:
+    """Verify and return the server-created task snapshot when one exists."""
+    snapshot = parameters.get(_NATIVE_WORKFLOW_SNAPSHOT_KEY)
+    if snapshot is None:
+        return None
+    if not isinstance(snapshot, dict) or set(snapshot) != {
+        "version", "steps", "workflow_name", "template_sha256", "document",
+    } or snapshot.get("version") != 1:
+        raise AppError(409, "native_ref2va_workflow_snapshot_invalid", "原生 H3 工作流冻结快照无效，未重发任务")
+    document = snapshot.get("document")
+    if not isinstance(document, dict) or not isinstance(snapshot.get("template_sha256"), str):
+        raise AppError(409, "native_ref2va_workflow_snapshot_invalid", "原生 H3 工作流冻结快照无效，未重发任务")
+    try:
+        requested_steps = int(parameters.get("steps", 4))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AppError(422, "native_ref2va_quality_invalid", "原生 MiniMax H3 的画质参数无效") from exc
+    if requested_steps != snapshot.get("steps"):
+        raise AppError(409, "native_ref2va_workflow_snapshot_mismatch", "冻结的 H3 工作流档位与本次任务不一致，未重发任务")
+    if _workflow_document_hash(document) != snapshot["template_sha256"]:
+        raise AppError(409, "native_ref2va_workflow_snapshot_changed", "冻结的 H3 工作流内容已损坏，未重发任务")
+    _prompt, metadata = _validate_workflow_document(document)
+    if metadata.get("workflow_profile") != "native_ref2va" or metadata.get("name") != snapshot.get("workflow_name"):
+        raise AppError(409, "native_ref2va_workflow_snapshot_invalid", "冻结的 H3 工作流不是原生 Ref2VA 图，未重发任务")
+    return copy.deepcopy(document)
+
+
+def native_video_reference_schema_errors(
+    nodes: dict[str, Any], *, reference_count: int = 1, include_audio: bool = False,
+) -> list[str]:
+    """Validate the live nodes needed for native multi-frame video inputs."""
+    if not isinstance(nodes, dict) or not 1 <= reference_count <= 3:
+        return ["原生视频参考节点检查参数无效"]
+    try:
+        loader = nodes["LoadVideo"]
+        split = nodes["GetVideoComponents"]
+        h3 = nodes["MiniMaxH3ReferenceToVideo"]
+        required = loader["input"]["required"]
+        split_required = split["input"]["required"]
+        video_spec = h3["input"]["optional"]["ref_videos"]
+        video_template = video_spec[1]["template"]
+        video_input = video_template["input"]["required"]["ref_video"]
+        valid = (
+            loader["output"][0] == "VIDEO"
+            and "file" in required
+            and split_required["video"][0] == "VIDEO"
+            and split["output"][0] == "IMAGE"
+            and video_spec[0] == "COMFY_AUTOGROW_V3"
+            and video_input[0] == "IMAGE"
+            and video_template["prefix"] == "ref_video_"
+            and int(video_template["max"]) >= reference_count
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        return ["LoadVideo、GetVideoComponents 或 H3 ref_videos 接口不匹配"]
+    if not valid:
+        return ["LoadVideo、GetVideoComponents 或 H3 ref_videos 接口不匹配"]
+    if not include_audio:
+        return []
+    try:
+        audio_spec = h3["input"]["optional"]["ref_video_audios"]
+        audio_template = audio_spec[1]["template"]
+        audio_input = audio_template["input"]["required"]["ref_video_audio"]
+        valid_audio = (
+            len(split["output"]) > 1
+            and split["output"][1] == "AUDIO"
+            and audio_spec[0] == "COMFY_AUTOGROW_V3"
+            and audio_input[0] == "AUDIO"
+            and audio_template["prefix"] == "ref_video_audio_"
+            and int(audio_template["max"]) >= reference_count
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        valid_audio = False
+    return [] if valid_audio else ["H3 ref_video_audios 原生音频接口不匹配"]
+
+
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -32,13 +197,17 @@ def bind_ordered_reference_slots(prompt,metadata,references):
     """Replace stale template slots with the exact supplied, ordered image set."""
     targets=[key for key,node in prompt.items() if node['class_type']=='MiniMaxH3ReferenceToVideo']
     if len(targets)!=1:raise AppError(422,'workflow_reference_target_ambiguous','R2V工作流必须只有一个明确参考目标节点')
-    if not 1<=len(references)<=9:raise AppError(422,'workflow_reference_limit','H3需要1至9张明确参考，未截断输入')
+    if not 0<=len(references)<=9:raise AppError(422,'workflow_reference_limit','H3 最多接受9张图片参考，未截断输入')
     paths=metadata.get('reference_paths') or []
     if not paths or len(paths[0])!=3 or paths[0][1:]!=['inputs','image'] or prompt.get(paths[0][0],{}).get('class_type')!='LoadImage':
         raise AppError(422,'workflow_reference_mapping_invalid','工作流需要明确LoadImage映射，未猜测自定义参考节点')
     target=prompt[targets[0]]['inputs']
     for key in list(target):
         if key.startswith('ref_images.'):del target[key]
+    if not references:
+        metadata['reference_paths']=[]
+        metadata['reference_tags']=[]
+        return []
     result=[]
     for index,_ in enumerate(references):
         node_id=paths[0][0] if index==0 else 'factory_ref_'+str(index)
@@ -280,31 +449,21 @@ class ComfyUIH3Provider:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    def _load_workflow(self) -> tuple[dict[str, Any], dict[str, Any]]:
-        path = self.settings.h3_workflow_api_json
-        if not path:
-            raise AppError(503, "h3_workflow_not_configured", "尚未配置 H3 API 工作流 JSON")
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise AppError(503, "h3_workflow_not_found", "H3 API 工作流文件不存在") from exc
-        except (OSError, json.JSONDecodeError) as exc:
-            raise AppError(503, "h3_workflow_invalid", "H3 API 工作流文件无法读取") from exc
-        metadata = payload.get("_video_factory")
-        prompt = payload.get("prompt")
-        if not isinstance(metadata, dict) or not isinstance(prompt, dict):
-            raise AppError(
-                503,
-                "h3_workflow_unverified",
-                "工作流必须包含 _video_factory 映射和 ComfyUI API prompt 图；不会猜测节点输入",
-            )
-        prompt_path = metadata.get("prompt_path")
-        if not isinstance(prompt_path, list) or not prompt_path:
-            raise AppError(503, "h3_workflow_unverified", "工作流缺少 prompt_path 映射")
-        if not all(isinstance(node, dict) and "class_type" in node for node in prompt.values()):
-            raise AppError(503, "h3_workflow_invalid", "prompt 不是 ComfyUI API 格式节点图")
-        validate_sampling_contract(prompt, metadata)
-        return copy.deepcopy(prompt), metadata
+    def _load_workflow(self, parameters: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+        # A queued/retried generation receives the graph captured when the
+        # task was created, rather than whatever happens to be on disk after a
+        # later deployment.  A new request is frozen by the API layer first.
+        if parameters is not None:
+            payload = _frozen_native_ref2va_document(parameters)
+            if payload is None:
+                payload = _read_workflow_document(native_ref2va_workflow_path(parameters))
+        else:
+            path = self.settings.h3_workflow_api_json
+            if not path:
+                raise AppError(503, "h3_workflow_not_configured", "尚未配置 H3 API 工作流 JSON")
+            payload = _read_workflow_document(path)
+        prompt, metadata = _validate_workflow_document(payload)
+        return copy.deepcopy(prompt), copy.deepcopy(metadata)
 
     @staticmethod
     def _set_path(document: dict[str, Any], path: list[str], value: Any) -> None:
@@ -353,6 +512,11 @@ class ComfyUIH3Provider:
                             options = fields[field][0]
                             if isinstance(options, list) and node["inputs"][field] not in options:
                                 issues.append(f"模型未安装/未识别: {node['inputs'][field]}")
+            video_reference_issues = native_video_reference_schema_errors(nodes)
+            # Reference audio is optional.  Its unsupported state is exposed
+            # in the diagnostic text but never makes visual Ref2VA unavailable.
+            optional_audio_issues = native_video_reference_schema_errors(nodes, include_audio=True)
+            issues.extend(video_reference_issues)
             version = None
             if isinstance(stats, dict):
                 system = stats.get("system") or {}
@@ -360,7 +524,7 @@ class ComfyUIH3Provider:
             return ProviderHealth(
                 provider=self.name,
                 connected=True,
-                ready=False,
+                ready=workflow_ready and h3_nodes and not issues,
                 reference_to_video_available=workflow_ready and h3_nodes and not issues,
                 mode="real",
                 base_url=self.settings.comfyui_base_url,
@@ -372,7 +536,8 @@ class ComfyUIH3Provider:
                     else "未在 object_info 中确认原生 MiniMaxH3ReferenceToVideo 节点"
                     if not h3_nodes
                     else "；".join(issues) if issues
-                    else "节点与权重文件可识别；模型加载和输出质量以实际任务结果为准"
+                    else ("节点与权重及原生视频参考接口可识别；参考视频音频不可用：" + "；".join(optional_audio_issues)
+                          if optional_audio_issues else "节点、权重及原生视频参考接口可识别；模型加载和输出质量以实际任务结果为准")
                 ),
             )
         except (httpx.HTTPError, ValueError) as exc:
@@ -401,7 +566,7 @@ class ComfyUIH3Provider:
 
     @gpu_submission
     async def _submit_prepared(self, request: VideoGenerationRequest, prepared) -> JobAccepted:
-        prompt, metadata = self._load_workflow()
+        prompt, metadata = self._load_workflow(request.parameters)
         self._set_path(prompt, metadata["prompt_path"], request.prompt)
         negative_path = metadata.get("negative_prompt_path")
         if negative_path:
@@ -422,8 +587,6 @@ class ComfyUIH3Provider:
             metadata['reference_manifest']=manifest
         if request.reference_assets and len(reference_paths) < len(request.reference_assets):
             raise AppError(422, "workflow_reference_limit", "工作流映射不足以容纳所选参考素材")
-        if not request.reference_assets:
-            raise AppError(422, "reference_required", "R2V 必须引用真实已审核图片")
         if metadata.get("mode") != "reference_to_video" or not any(n["class_type"] == "MiniMaxH3ReferenceToVideo" for n in prompt.values()):
             raise AppError(422, "r2v_workflow_required", "必须使用官方原生 R2V 节点")
         if metadata.get("output_prefix_path"):
@@ -459,21 +622,19 @@ class ComfyUIH3Provider:
                     if len(request.motion_references)>3:raise AppError(422,'motion_reference_limit','动作参考最多3条')
                     definitions=(await client.get(f"{self.settings.comfyui_base_url}/object_info"))
                     definitions.raise_for_status();nodes=definitions.json()
-                    try:
-                        loader=nodes['LoadVideo'];split=nodes['GetVideoComponents']
-                        video_spec=nodes['MiniMaxH3ReferenceToVideo']['input']['optional']['ref_videos']
-                        valid=(loader['output'][0]=='VIDEO' and 'file' in loader['input']['required'] and
-                               split['input']['required']['video'][0]=='VIDEO' and split['output'][0]=='IMAGE' and
-                               video_spec[0]=='COMFY_AUTOGROW_V3' and video_spec[1]['template']['input']['required']['ref_video'][0]=='IMAGE' and
-                               video_spec[1]['template']['prefix']=='ref_video_' and video_spec[1]['template']['max']>=len(request.motion_references))
-                    except (KeyError,IndexError,TypeError):valid=False
-                    if not valid:raise AppError(409,'motion_nodes_unsupported','本机视频参考节点或接口版本不兼容，未提交生成')
+                    needs_audio=any(bool(ref.get('include_audio')) for ref in request.motion_references)
+                    schema_issues = native_video_reference_schema_errors(
+                        nodes, reference_count=len(request.motion_references), include_audio=needs_audio,
+                    )
+                    if schema_issues:
+                        if needs_audio:
+                            raise AppError(409,'motion_audio_nodes_unsupported','已明确要求参考视频音频，但本机 H3 节点未暴露匹配的原生 ref_video_audio 输入，未提交生成')
+                        raise AppError(409,'motion_nodes_unsupported','本机视频参考节点或接口版本不兼容，未提交生成')
                     targets=[key for key,node in prompt.items() if node['class_type']=='MiniMaxH3ReferenceToVideo']
                     if len(targets)!=1:raise AppError(422,'motion_target_invalid','视频参考必须连接唯一的 H3 节点')
                     target=prompt[targets[0]]['inputs']
-                    if any(key.startswith('ref_video_audios.') for key in target):raise AppError(422,'motion_audio_forbidden','此工作流含原声参考，未提交生成')
                     for key in list(target):
-                        if key.startswith('ref_videos.'):del target[key]
+                        if key.startswith('ref_videos.') or key.startswith('ref_video_audios.'):del target[key]
                     for index,(ref,(data,processed)) in enumerate(zip(request.motion_references,prepared)):
                         if not request.job_id or not all(c.isalnum() or c in '_-' for c in request.job_id) or len(request.job_id)>64:
                             raise AppError(422,'motion_job_id_invalid','动作参考任务 ID 无效，未提交生成')
@@ -496,12 +657,19 @@ class ComfyUIH3Provider:
                         prompt[load]={'class_type':'LoadVideo','inputs':{'file':filename}}
                         prompt[components]={'class_type':'GetVideoComponents','inputs':{'video':[load,0]}}
                         target[f'ref_videos.ref_video_{index}']=[components,0]
+                        include_audio=bool(ref.get('include_audio'))
+                        if include_audio:
+                            if not processed.get('audio_included'):
+                                raise AppError(422,'motion_reference_audio_missing','已要求使用参考视频音频，但预处理结果没有可用音轨')
+                            target[f'ref_video_audios.ref_video_audio_{index}']=[components,1]
                         motion_uploads.append({'video_index':index+1,'video_id':ref['video_id'],'source_sha256':ref['source_sha256'],
                             'expected_revision':ref['expected_revision'],'trim_start_seconds':ref['trim_start_seconds'],
                             'trim_end_seconds':ref['trim_end_seconds'],'effective_frames':ref['effective_frames'],
-                            'effective_duration_seconds':ref['effective_duration_seconds'],'processed':processed,
+                            'effective_duration_seconds':ref['effective_duration_seconds'],
+                            'reference_role':ref.get('reference_role','combined'),'processed':processed,
                             'workflow_slot':f'ref_videos.ref_video_{index}','load_video_node':load,
-                            'components_node':components,'actual_uploaded_video':filename,'audio_included':False})
+                            'components_node':components,'actual_uploaded_video':filename,'audio_included':include_audio,
+                            **({'audio_workflow_slot':f'ref_video_audios.ref_video_audio_{index}'} if include_audio else {})})
                         receipt.update(status='uploaded_verified',uploads=motion_uploads,pending_name=None)
                         (logdir/'motion_reference_transfer.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2),encoding='utf-8')
                     metadata['motion_reference_uploads']=motion_uploads
@@ -537,7 +705,18 @@ class ComfyUIH3Provider:
         if not prompt_id:
             if request.motion_references:raise AppError(502,'motion_submission_unknown','动作参考提交响应缺少任务 ID；保留任务，不自动重发')
             raise AppError(502, "comfyui_invalid_response", "ComfyUI 响应缺少 prompt_id")
-        return JobAccepted(str(prompt_id), "queued", metadata={"workflow": metadata.get("name"), "workflow_sha256": hashlib.sha256(json.dumps(prompt, sort_keys=True).encode()).hexdigest(), "log_dir": str(logdir),'reference_manifest':manifest,'reference_uploads':uploads,'motion_reference_uploads':motion_uploads,'sampling_receipt':metadata.get('sampling_receipt')})
+        frozen = request.parameters.get(_NATIVE_WORKFLOW_SNAPSHOT_KEY, {})
+        return JobAccepted(str(prompt_id), "queued", metadata={
+            "workflow": metadata.get("name"),
+            # This is the exact rendered Comfy prompt (including the selected
+            # media slots), while template_sha256 identifies the immutable
+            # native graph saved in the task snapshot.
+            "workflow_sha256": hashlib.sha256(json.dumps(prompt, sort_keys=True).encode()).hexdigest(),
+            "workflow_template_sha256": frozen.get("template_sha256"),
+            "log_dir": str(logdir),
+            'reference_manifest':manifest,'reference_uploads':uploads,
+            'motion_reference_uploads':motion_uploads,'sampling_receipt':metadata.get('sampling_receipt'),
+        })
 
     async def get_job(self, job_id: str) -> dict[str, Any]:
         try:

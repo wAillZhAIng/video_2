@@ -32,9 +32,9 @@ MODULES = {'character_generation': {'comfyui','openai_compatible','cloud_draft'}
     'quality_check':{'ffmpeg','openai_compatible','cloud_draft'}}
 
 BUILTIN_VIDEO_WORKFLOWS = (
-    {'id': 'context_ir', 'label': 'Context-IR 三档：Fast 4 / Quality 20 / Quality 30', 'h3_context_ir': True},
-    {'id': 'native_h3_r2v', 'label': '原生 H3 R2V 直连（4-step Turbo LoRA）', 'h3_context_ir': False},
+    {'id': 'native_h3_ref2va', 'label': 'MiniMax H3 原生 Ref2VA：Fast 4 / 标准 20 / 高质量 30'},
 )
+NATIVE_H3_FAST_WORKFLOW = PROJECT_ROOT / 'workflows/h3_ref2va_native_fast4_v2.json'
 
 
 def normalize_service_settings(module, provider, base_url, options):
@@ -42,13 +42,9 @@ def normalize_service_settings(module, provider, base_url, options):
     confirmed = confirmed_local_origin(base_url, options)
     if confirmed:
         options['local_service_origin'] = confirmed
-    profile = options.get('workflow_profile')
-    if profile == 'context_ir':
-        options['h3_context_ir'] = True
-        options.pop('workflow_path', None)
-    elif profile == 'native_h3_r2v':
-        options['h3_context_ir'] = False
-        options['workflow_path'] = str(PROJECT_ROOT / 'workflows/h3_r2v_character_v1.json')
+    if module == 'video_generation' and provider == 'comfyui':
+        options['workflow_profile'] = 'native_h3_ref2va'
+        options['workflow_path'] = str(NATIVE_H3_FAST_WORKFLOW)
     return options
 
 
@@ -57,7 +53,7 @@ def validate_configuration(module, provider, base_url, options):
         raise AppError(422, 'adapter_not_supported', '此业务模块尚未实现该服务适配器')
     if any(key.lower() in {'api_key', 'token', 'authorization', 'secret', 'password', 'headers'} for key in options):
         raise AppError(422, 'secret_in_settings', '密钥只能通过专用密码字段保存')
-    allowed = {'timeout', 'concurrency', 'width', 'height', 'duration', 'candidate_model', 'text_encoder', 'vae', 'workflow_path', 'workflow_profile', 'h3_context_ir', 'local_service_origin', 'ffmpeg_path', 'ffprobe_path', 'fps', 'codec', 'audio_policy', 'image_api_format', 'video_contract','max_tokens','runtime_family','voice','response_format','max_prompt_characters'}
+    allowed = {'timeout', 'concurrency', 'width', 'height', 'duration', 'candidate_model', 'text_encoder', 'vae', 'workflow_path', 'workflow_profile', 'local_service_origin', 'ffmpeg_path', 'ffprobe_path', 'fps', 'codec', 'audio_policy', 'image_api_format', 'video_contract','max_tokens','runtime_family','voice','response_format','max_prompt_characters'}
     if module == 'background_music':
         from app.services.background_music import GAIN_DB, validate_endpoint
         validate_endpoint(base_url)
@@ -71,13 +67,11 @@ def validate_configuration(module, provider, base_url, options):
         if provider not in {'comfyui', 'local_llm'}:
             raise AppError(422, 'local_confirmation_not_supported', '仅本地 ComfyUI 和本地语言服务可确认本地地址')
         confirmed_local_origin(base_url, options)
-    if options.get('workflow_profile') or 'h3_context_ir' in options:
+    if options.get('workflow_profile'):
         if provider != 'comfyui' or module != 'video_generation':
             raise AppError(422, 'workflow_profile_not_supported', '内置视频工作流仅用于 ComfyUI 视频服务')
-        if options.get('workflow_profile') not in (None, '', 'context_ir', 'native_h3_r2v'):
-            raise AppError(422, 'workflow_profile_invalid', '请选择已审核的内置 H3 工作流')
-        if 'h3_context_ir' in options and type(options['h3_context_ir']) is not bool:
-            raise AppError(422, 'workflow_profile_invalid', 'Context-IR 标志必须为布尔值')
+        if options.get('workflow_profile') not in ('native_h3_ref2va',):
+            raise AppError(422, 'workflow_profile_invalid', '视频生成仅支持原生 MiniMax H3 Ref2VA 直连工作流')
     if provider == 'video_api' and options.get('video_contract') not in (None, '', 'video-jobs-v1', 'wan26-i2v', 'lk888-h3-v2'):
         raise AppError(422, 'video_contract_invalid', '请选择已实现的视频接口契约')
     prompt_limit = options.get('max_prompt_characters')
@@ -174,12 +168,16 @@ def seed_local_services(session, settings):
     deleted_modules = {r['values'].get('module') for task in session.scalars(select(DeletionTask)) if task.status not in ('planned','database_failed','restored') for r in task.plan_json.get('records',[]) if r['table']=='ai_services'}
     for module, name, provider, model, options in [
         ('character_generation', '本机人物素材 · ComfyUI', 'comfyui', 'flux-2-klein-4b-fp8.safetensors', {'timeout': None, 'concurrency': 1, 'width': 832, 'height': 1024, 'candidate_model': 'flux-2-klein-4b-fp8.safetensors', 'text_encoder': 'qwen_3_4b.safetensors', 'vae': 'flux2-vae.safetensors'}),
-        ('video_generation', '本机 MiniMax H3 R2V', 'comfyui', 'minimax_h3_ref2va_pruned_w6a8.safetensors', {'timeout': None, 'concurrency': 1, 'width': 640, 'height': 384, 'duration': 5, 'workflow_path': str(settings.h3_workflow_api_json or PROJECT_ROOT / 'workflows/h3_r2v_character_v1.json')}),
+        ('video_generation', '本机 MiniMax H3 Ref2VA', 'comfyui', 'minimax_h3_ref2va_pruned_w6a8.safetensors', {'timeout': None, 'concurrency': 1, 'width': 640, 'height': 384, 'duration': 5, 'workflow_profile': 'native_h3_ref2va', 'workflow_path': str(NATIVE_H3_FAST_WORKFLOW)}),
         ('final_assembly', '本机 FFmpeg', 'ffmpeg', '', {'timeout': None, 'concurrency': 1, 'ffmpeg_path': settings.ffmpeg_path, 'ffprobe_path': settings.ffprobe_path, 'width': 640, 'height': 384, 'fps': 24, 'codec': 'libx264', 'audio_policy': 'preserve'})]:
         if provider == 'comfyui' and not settings.seed_local_model_services:
             continue
-        if module not in deleted_modules and session.scalar(select(AIService.id).where(AIService.module == module)) is None:
+        services = list(session.scalars(select(AIService).where(AIService.module == module)))
+        if module not in deleted_modules and not services:
             session.add(AIService(module=module, name=name, provider=provider, base_url='' if provider == 'ffmpeg' else settings.comfyui_base_url, is_default=True, default_model=model, settings_json=options))
+            continue
+        if module != 'video_generation':
+            continue
     session.commit()
 
 
@@ -387,41 +385,35 @@ async def probe_service(service, settings):
                     capabilities['text_to_image'] = {'state': 'detected', 'source': 'object_info SDXL loader/sampler'}
                 if all(name in nodes for name in required_edit) and service.default_model in diffusion and service.settings_json.get('text_encoder') in choices('CLIPLoader', 'clip_name') and service.settings_json.get('vae') in choices('VAELoader', 'vae_name'):
                     capabilities['reference_image'] = {'state': 'detected', 'source': 'native ReferenceLatent + installed selected models'}
-            elif service.module == 'video_generation' and service.settings_json.get('h3_context_ir') is True:
-                from app.services.h3_context_provider import require_context_qwen
-                class RuntimeProbeClient:
-                    async def get(self, url, **_kwargs):
-                        if service_origin(url) != service_origin(snapshot['base_url']):
-                            raise AppError(422, 'service_origin_changed', '运行时探测不能连接其他地址')
-                        reply = await service_request(settings, snapshot, 'GET', urlsplit(url).path, secret, client_timeout=10.0)
-                        if reply.status_code == 200:
-                            receipt = reply.json()
-                            if isinstance(receipt, dict):
-                                result['runtime'] = receipt
-                        return reply
-                await require_context_qwen(RuntimeProbeClient(), snapshot['base_url'].rstrip('/'), runtime_required=True)
-                capabilities['reference_to_video'] = {'state': 'detected', 'source': 'Context-IR native runtime identity, node/model checks and local Qwen vision/32K readiness; inference remains unverified'}
-                capabilities['reference_video'] = {'state': 'detected', 'source': 'Context-IR native runtime readiness; inference remains unverified'}
-                result['notice'] = '本地 Context-IR 运行时与 Qwen 就绪；尚未执行本次真实视频生成。'
             elif service.module == 'video_generation':
                 try:
-                    graph = json.loads(Path(service.settings_json.get('workflow_path') or settings.h3_workflow_api_json).read_text(encoding='utf-8'))
-                    prompt, mapping = graph['prompt'], graph['_video_factory']
-                    valid = mapping.get('mode') == 'reference_to_video' and bool(mapping.get('reference_paths')) and any(node['class_type']=='MiniMaxH3ReferenceToVideo' for node in prompt.values())
-                    selected_models = []
-                    for node in prompt.values():
-                        valid = valid and node['class_type'] in nodes
-                        for key in ('unet_name','clip_name','vae_name'):
-                            if key in node['inputs']:
-                                valid = valid and node['inputs'][key] in choices(node['class_type'],key)
-                                if key=='unet_name': selected_models.append(node['inputs'][key])
-                    if valid and service.default_model in selected_models:
+                    from app.services.providers import native_ref2va_workflow_path
+
+                    invalid_tiers = []
+                    for steps in (4, 20, 30):
+                        graph = json.loads(native_ref2va_workflow_path({'steps': steps}).read_text(encoding='utf-8'))
+                        prompt, mapping = graph['prompt'], graph['_video_factory']
+                        valid = (mapping.get('mode') == 'reference_to_video'
+                                 and bool(mapping.get('reference_paths'))
+                                 and any(node['class_type'] == 'MiniMaxH3ReferenceToVideo' for node in prompt.values()))
+                        selected_models = []
+                        for node in prompt.values():
+                            valid = valid and node['class_type'] in nodes
+                            for key in ('unet_name', 'clip_name', 'vae_name'):
+                                if key in node['inputs']:
+                                    valid = valid and node['inputs'][key] in choices(node['class_type'], key)
+                                    if key == 'unet_name':
+                                        selected_models.append(node['inputs'][key])
+                        if not valid or service.default_model not in selected_models:
+                            invalid_tiers.append(steps)
+                    if not invalid_tiers:
                         capabilities['reference_to_video'] = {'state':'detected','source':'configured native H3 graph; all nodes and exact loader models detected'}
                         capabilities['revision'] = {'state':'detected','source':'same-reference regeneration; no pixel-local editing'}
                     else:
-                        result['workflow_error'] = '选定模型与 R2V 工作流节点/权重未全部匹配，能力保持未验证'
+                        tiers = ' / '.join(str(steps) for steps in invalid_tiers)
+                        result['workflow_error'] = f'选定模型与 {tiers} Step R2V 工作流节点/权重未全部匹配，能力保持未验证'
                 except (OSError,ValueError,KeyError,TypeError):
-                    result['workflow_error'] = '无法验证实际 R2V 工作流文件'
+                    result['workflow_error'] = '无法验证 Fast 4、标准 20 或高质量 30 Step R2V 工作流文件'
             result.update(status='connected', models=[{'id': model, 'source': 'ComfyUI object_info loader choices'} for model in dict.fromkeys(models)], capabilities=capabilities, source='GET /object_info; node/file detection is distinct from actual inference')
             result['reachable'] = True
             if result.get('workflow_error'):

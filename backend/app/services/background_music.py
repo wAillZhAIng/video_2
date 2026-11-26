@@ -163,11 +163,11 @@ async def _idle(settings, snapshot):
 
 
 def _configured_gpu_peers(session, settings):
-    """Read actual enabled Compute origins, independent of legacy port defaults."""
+    """Read actual enabled native Compute origins, independent of sidecars."""
     services = session.scalars(select(AIService).where(
         AIService.enabled.is_(True), AIService.module == 'video_generation', AIService.provider == 'comfyui'))
     candidates = [settings.comfyui_base_url]
-    candidates.extend(row.base_url for row in services if row.settings_json.get('h3_context_ir') is True)
+    candidates.extend(row.base_url for row in services)
     peers = []
     for origin in dict.fromkeys(candidates):
         try:

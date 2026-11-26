@@ -57,7 +57,7 @@ echo ================================================================
 echo   40 条 Word 自动视频制作
 echo   Word 根目录：%SCRIPT_ROOT%
 echo   Git 工作流：%SOURCE_ROOT%
-echo   默认：H3 Context-IR + SMD4 Fast 4-step + 4K Real-ESRGAN 超分
+echo   默认：MiniMax H3 Ref2VA + SMD4 Fast 4-step + 4K Real-ESRGAN 超分
 echo   画幅：逐份读取 Word；云端服务、付费回退均关闭
 echo ================================================================
 echo.

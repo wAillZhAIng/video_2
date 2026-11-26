@@ -159,7 +159,7 @@ def uses_structured_screenplay(session,shot):
     return len(participants)>1 or not shot.character_id or bool(detail and detail.source_json.get('structured_edit')) or any(not p.source_json.get('legacy') and not p.source_json.get('migration') for p in participants)
 
 
-def generation_inputs(session, shot, settings):
+def generation_inputs(session, shot, settings, *, allow_no_visual_references=False):
     """Compile all participants, ordered speakers, scene and photography to R2V."""
     from app.core.paths import safe_media_path
     bundle=shot_bundle(session,shot.id)
@@ -200,7 +200,6 @@ def generation_inputs(session, shot, settings):
         bundle['products']=shot_product_snapshot(session,shot)
         bundle['product_appearance_review']={'status':'needs_review','exact_logo_text_verified':False,
             'limitations':['产品参考图已进入实际输入；外观连续性、包装文字与Logo复现仍需人工审核，必要时后期叠加。']}
-    from app.services.cinematic_quality import compile_context
     if product_only:
         shot_description = 'A product presentation shot showing the defined products. Do not add people or hands.'
         photography_direction = 'product photography, practical lighting and physically grounded product movement.'
@@ -219,13 +218,8 @@ def generation_inputs(session, shot, settings):
         production_heading = 'Scene and sound directions:'
         composition_direction = 'Use its framing and scene content as visual guidance. '
         retention_direction = 'the written shot defines the visible subjects and action.'
-    cinematic=compile_context(session,shot,settings)
-    # Reference transport is schema-agnostic: the canonical preflight resolves
-    # approved scene/keyframe images for every script type.  The optional
-    # cinematic compiler only enriches metadata; it never decides whether an
-    # otherwise valid reference reaches native H3.
-    if cinematic:
-        bundle['cinematic']=cinematic
+    # Reference transport is schema-agnostic: approved scene/keyframe images
+    # enter the direct native H3 request for every script type.
     from app.services.cinematic_quality import shot_preflight
     visual_ids=shot_preflight(session,settings,shot,require_visual=False)['visual_ids']
     if visual_ids:
@@ -244,7 +238,7 @@ def generation_inputs(session, shot, settings):
             else:
                 definitions.append(f'<Picture {len(references)}> is the composition planning reference for [Shot 1]. {composition_direction}This is guidance, not a guaranteed exact first frame.')
                 retention.append(f'<Picture {len(references)}> ([Shot 1] composition): partially_preserved - viewpoint and placement guide the shot while {retention_direction}')
-    if not bundle['participants'] and not references:
+    if not bundle['participants'] and not references and not allow_no_visual_references:
         raise AppError(409,'participants_required','当前参考生视频需要至少一张可用的画面参考，可绑定场景图或关键画面')
     if len(references)>9:raise AppError(422,'reference_limit','当前H3适配器最多传入9张人物/产品/场景/关键画面参考图，请减少所选数量')
     audio=list(bundle['audio_events'])
@@ -276,10 +270,6 @@ def generation_inputs(session, shot, settings):
         production_heading,*performances,*dialogue,
         'overall_soundscape:', '\n'.join(json.dumps({k:x.get(k) for k in ('kind','description','start_seconds','end_seconds','volume')},ensure_ascii=False) for x in audio if x['kind']!='music' and not x.get('relative_path')) or shot.audio_direction or 'Quiet room tone accompanies the visible actions.',
         'non_diegetic_music:', 'N/A'])
-    if cinematic:
-        prompt=prompt.replace('[Shot 1] ',cinematic['contact_directions']+'\n[Shot 1] ',1)
-        text='Cinematic production rules (version '+cinematic['versions']['production_rules_version']+'):\n'+cinematic['rules_text']+'\nReviewed production designs, timed actions and continuity states: '+json.dumps({k:cinematic[k] for k in ['production','entities']},ensure_ascii=False)
-        prompt=prompt.replace('overall_soundscape:',text+'\noverall_soundscape:')
     bundle['reference_manifest']=reference_manifest(actors,references,stage='video',policy=policy,excluded=excluded)
     bundle['reference_manifest']['speakers']=[{'participant_id':identifier,'subject_tag':subjects[identifier],'speaker_tag':f'S{number}'} for identifier,number in speakers.items()]
     from app.services.cinematic_rules import fingerprint

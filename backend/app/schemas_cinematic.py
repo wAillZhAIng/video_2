@@ -86,24 +86,31 @@ class Beat(Preserved):
 
 
 class MotionReferenceInput(BaseModel):
-    """An explicit, per-shot permission to use a bounded source segment."""
+    """An explicit, per-shot native Ref2VA source segment.
+
+    ``motion_references`` remains the persisted field name so prior project
+    snapshots are still readable. Its contents now describe any native video
+    reference role; no external analyser or compiler interprets the media.
+    """
     model_config=ConfigDict(extra='forbid', allow_inf_nan=False)
     video_id:str=Field(min_length=1,max_length=64)
     expected_revision:int=Field(ge=1)
     source_sha256:str=Field(pattern=r'^[0-9a-f]{64}$')
     trim_start_seconds:float=Field(ge=0)
     trim_end_seconds:float=Field(gt=0)
-    authorized_for_motion:bool
-    reference_role:Literal['structure','action']|None=None
+    authorized_for_motion:bool=False
+    authorized_for_reference:bool=False
+    reference_role:Literal['structure','action','camera','style','combined']='combined'
+    include_audio:bool=False
     target_character_id:str|None=Field(default=None,min_length=1,max_length=64)
 
     @model_validator(mode='after')
     def valid_segment(self):
-        if not self.authorized_for_motion:raise ValueError('请明确确认本镜可以使用该视频的动作参考')
+        if not (self.authorized_for_motion or self.authorized_for_reference):raise ValueError('请明确确认本镜可以使用该参考视频')
         if not 2 <= self.trim_end_seconds-self.trim_start_seconds <= 15:
-            raise ValueError('动作参考片段需为2至15秒')
-        if self.target_character_id and self.reference_role != 'action':
-            raise ValueError('只有动作与姿态参考可以明确绑定人物')
+            raise ValueError('参考视频片段需为2至15秒')
+        if self.target_character_id and self.reference_role not in {'action','combined'}:
+            raise ValueError('只有动作或综合参考可以明确绑定人物')
         return self
 
 

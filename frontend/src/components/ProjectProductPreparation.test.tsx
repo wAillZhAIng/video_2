@@ -16,7 +16,7 @@ function install(){let data={project_id:'p1',product,expected_token:'a'.repeat(6
   throw new Error('Unexpected request '+url);
 });}
 afterEach(()=>{cleanup();mocked.mockReset();vi.restoreAllMocks();});
-it('uses the server Context-IR limit and submits every one of eight selected views',async()=>{
+it('uses the server native H3 limit and submits every one of eight selected views',async()=>{
   const images=Array.from({length:8},(_,index)=>({id:`view-${index}`,filename:`view-${index}.png`,thumbnail_url:`/view-${index}.png`}));
   const item={...product,images};
   let selected={project_id:'p1',product:item,expected_token:'b'.repeat(64),image_ids:[] as string[],shot_ids:[] as string[],bound:false,

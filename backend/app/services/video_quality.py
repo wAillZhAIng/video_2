@@ -27,7 +27,7 @@ MODES = {
     'high': {'steps': 30, 'crf': 16, 'preset': 'slow'},
     'standard': {'steps': 20, 'crf': 18, 'preset': 'medium'},
     'fast': {'steps': 4, 'crf': 23, 'preset': 'fast'},
-    # Retained for settings and historical runs written before Context-IR routing.
+    # Retained for settings and historical runs written before native profile unification.
     'preview': {'steps': 12, 'crf': 23, 'preset': 'fast'},
 }
 SEEDVR_RUNTIME_WAIT = 'seedvr_runtime_unavailable'

@@ -10,15 +10,13 @@
 - `workflows/h3_r2v_character_v1.json`
 - `workflows/arcreel_minimax_h3_r2v.endpoint.json`（保留已有兼容文件名）
 
-来源：[Comfy-Org/workflow_templates](https://github.com/Comfy-Org/workflow_templates/tree/e7cd011d4ded3411c2f481200544f0be6fdc962e)，固定提交 `e7cd011d4ded3411c2f481200544f0be6fdc962e`。完整 MIT 版权声明见 `licenses/Comfy-Org-workflow-templates-MIT.txt`。接口图调整了输入图像、提示词、保存文件名前缀；其运行节点来自官方模板。另一个独立的 ArcReel 项目及其代码没有打包在本仓库中。
+来源：[Comfy-Org/workflow_templates](https://github.com/Comfy-Org/workflow_templates/tree/e7cd011d4ded3411c2f481200544f0be6fdc962e)，固定提交 `e7cd011d4ded3411c2f481200544f0be6fdc962e`。完整 MIT 版权声明见 `licenses/Comfy-Org-workflow-templates-MIT.txt`。接口图调整了输入图像、提示词和保存文件名前缀；其运行节点来自官方模板。另一个独立的 ArcReel 项目及其代码没有打包在本仓库中。
 
-## ComfyUI-OpenH3-IR 派生工作流
+## 原生 MiniMax H3 Ref2VA 工作流
 
-`workflows/H3_R2V_OpenH3IR_Quality.json`、`workflows/H3_R2V_OpenH3IR_Quality.api.json` 与 `workflows/H3_R2V_OpenH3IR_SMD4_Fast.json`、`workflows/H3_R2V_OpenH3IR_SMD4_Fast.api.json` 是基于 [ComfyUI-OpenH3-IR 原始示例](https://github.com/ruashots/ComfyUI-OpenH3-IR/blob/8660988b033d427f346e72fdbcf2d45ede48edbe/example/openh3ir_base_workflow.json) 修改的两组工作流，固定上游提交为 `8660988b033d427f346e72fdbcf2d45ede48edbe`。保留的完整上游文件见 [LICENSE](licenses/ComfyUI-OpenH3-IR/LICENSE)、[NOTICE](licenses/ComfyUI-OpenH3-IR/NOTICE)；逐字节来源、提交和 SHA256 记录在 [SOURCE.json](licenses/ComfyUI-OpenH3-IR/SOURCE.json)。
+`workflows/h3_ref2va_native_fast4_v2.json`、`workflows/h3_ref2va_native_quality20_v2.json` 和 `workflows/h3_ref2va_native_quality30_v2.json` 是本项目的 API 工作流封装，目标是当前安装的原生 ComfyUI MiniMax H3 Ref2VA 节点。它们不打包第三方节点、模型、权重或用户素材。Fast 保留 SMD 4-step LoRA 配方，两个 Quality 工作流各自固定质量档位；实际节点和模型兼容性必须由用户的 ComfyUI `/object_info` 验证。
 
-本项目修改了模型选择、本地离线 Qwen 接线、统一素材托盘与引用声明、输出与回执，并提供 Quality 20/30 步路由。SMD Fast 图另外使用指定 INT8 基础模型、SMD LoRA、四步 sigma 序列、采样器和真实应用审计。原生包内的自有 wrapper 提供编译源与引用绑定保护、参考缓存策略、writer-envelope 格式兼容及 LoRA 采样回执；其作用范围和固定第三方源版本见 `runtime-manifests/context-ir-native-v1.json`。它们不替换上游编译器整体，也不将第三方运行节点重新授权。
-
-上游节点和编译器适用其 Apache-2.0 声明；MiniMax H3、SMD 适配器及 Qwen 权重适用各自模型许可证。保留上述工作流许可不代表分发模型权重或授予模型使用权。本仓库不包含这些权重。
+MiniMax H3、SMD 适配器和 ComfyUI 节点适用各自的上游许可与使用条款。保留本说明不代表分发模型权重或授予模型使用权。
 
 ## Python、JavaScript 和系统组件
 
@@ -28,4 +26,4 @@
 
 ## 模型与服务
 
-ComfyUI 插件、MiniMax、Qwen、语音、超分及云端供应商不随通用 CPU 应用镜像安装。请另行检查对应版本的模型许可、硬件条件、部署地域和服务条款。配置一个服务地址不授予其模型或内容使用权。
+ComfyUI 插件、MiniMax、语音、超分及云端供应商不随通用 CPU 应用镜像安装。请另行检查对应版本的模型许可、硬件条件、部署地域和服务条款。配置一个服务地址不授予其模型或内容使用权。

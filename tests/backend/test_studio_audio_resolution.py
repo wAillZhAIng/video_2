@@ -133,23 +133,16 @@ def test_shorten_is_per_run_text_override_with_immutable_screenplay(failed):
     assert failed.run.result_json['audio_duration_resolutions']['isolated-command-1']['change']['effective_text']=='Look, a gift!'
 
 
-def test_extend_updates_revision_requeues_video_and_preserves_tts(failed,monkeypatch):
+def test_extend_updates_revision_requeues_video_and_preserves_frozen_native_references(failed):
     before=copy.deepcopy(failed.run.nodes_json[1]);revision=failed.shot.revision
-    failed.run.snapshot_json={**failed.run.snapshot_json,'h3_context_by_shot':{
-        failed.shot.id:{'inputs':{'explicit_visual_ids':['image-a'],'audio_policy':'tts'},'service':{'actual':'frozen'}}}}
-    captured=[]
-    def collect(session,settings,shot,**kwargs):
-        captured.append((shot.duration_seconds,shot.revision,kwargs))
-        return {'duration_seconds':shot.duration_seconds,'shot_revision':shot.revision,'fingerprint':'new-context'}
-    monkeypatch.setattr('app.services.context_production_inputs.collect_context_inputs',collect)
-    monkeypatch.setattr('app.services.context_production_inputs.restore_context_inputs',lambda *a:([],[]))
+    frozen=[{'video_id':'reference-a','source_sha256':'a'*64,'authorized_for_reference':True}]
+    failed.run.snapshot_json={**failed.run.snapshot_json,'reference_videos_by_shot':{failed.shot.id:frozen}}
     result,_,_=execute(failed,choice(failed,'extend_video',target_duration_seconds=6))
     assert failed.shot.duration_seconds==6 and failed.shot.revision==revision+1
     assert failed.run.nodes_json[1]==before
     assert failed.run.nodes_json[0]['child_id'] is None
     assert 'tts:'+failed.line.id not in result['affected_nodes']
-    assert captured[0][2]['image_ids']==['image-a']
-    assert failed.run.snapshot_json['h3_context_by_shot'][failed.shot.id]['inputs']['duration_seconds']==6
+    assert failed.run.snapshot_json['reference_videos_by_shot'][failed.shot.id] == frozen
     assert failed.shot.id in failed.run.snapshot_json['options']['force_shot_ids']
 
 
@@ -329,13 +322,13 @@ def test_api_get_preview_apply_and_network_retry_are_consistent(failed):
         assert failed.session.get(StudioRun,failed.run.id).nodes_json[1]['tts_parameters_override']=={'speed':1.9,'language':'EN'}
 
 
-@pytest.mark.parametrize('kind',['dialogue','frozen_context','frozen_routes','tts_parameters'])
-def test_cas_covers_live_subdocuments_context_routes_and_parameters(failed,kind):
+@pytest.mark.parametrize('kind',['dialogue','frozen_native_references','frozen_routes','tts_parameters'])
+def test_cas_covers_live_subdocuments_native_routes_and_parameters(failed,kind):
     payload=choice(failed,speed=1.9,dialogue_line_id=failed.line.id)
     if kind=='dialogue':
         failed.line.delivery_json={'emotion':'new edited delivery'}
-    elif kind=='frozen_context':
-        failed.run.snapshot_json={**failed.run.snapshot_json,'h3_context_by_shot':{failed.shot.id:{'inputs':{'changed':True}}}}
+    elif kind=='frozen_native_references':
+        failed.run.snapshot_json={**failed.run.snapshot_json,'reference_videos_by_shot':{failed.shot.id:[{'changed':True}]}}
     elif kind=='frozen_routes':
         failed.run.snapshot_json={**failed.run.snapshot_json,'routes':{'dialogue_generation':{'selected':{'changed':True}}}}
     else:
@@ -352,23 +345,6 @@ def test_existing_stale_source_requires_new_production(failed):
     with pytest.raises(AppError) as exc:
         repair.preview(failed.session,failed.settings,failed.project.id,failed.node_id,payload)
     assert exc.value.code=='audio_resolution_source_stale'
-
-
-def test_extend_validates_original_frozen_inputs_before_collecting(failed,monkeypatch):
-    failed.run.snapshot_json={**failed.run.snapshot_json,'h3_context_by_shot':{
-        failed.shot.id:{'inputs':{'frozen':'old-approved-sku'}}}}
-    original_duration=failed.shot.duration_seconds
-    def stale(*args):
-        raise AppError(409,'context_input_snapshot_stale','Approved product reference changed')
-    def must_not_collect(*args,**kwargs):
-        raise AssertionError('Cannot silently collect changed media')
-    monkeypatch.setattr('app.services.context_production_inputs.restore_context_inputs',stale)
-    monkeypatch.setattr('app.services.context_production_inputs.collect_context_inputs',must_not_collect)
-    payload=choice(failed,'extend_video',target_duration_seconds=6)
-    with pytest.raises(AppError) as exc:
-        repair.preview(failed.session,failed.settings,failed.project.id,failed.node_id,payload)
-    assert exc.value.code=='context_input_snapshot_stale'
-    assert failed.shot.duration_seconds==original_duration
 
 
 def test_kept_decision_is_invalidated_only_for_repaired_shot(failed):

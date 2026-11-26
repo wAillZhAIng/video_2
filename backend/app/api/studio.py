@@ -1,7 +1,7 @@
 """Unified workstation API; no UI progress is inferred from elapsed time."""
 import copy
 import asyncio
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,8 +10,9 @@ from app import models as m
 from app.models.studio import StudioRun
 from app.core.db import get_db
 from app.core.errors import AppError
+from app.core.paths import safe_media_path
 from app.schemas_studio import (PipelineStart, StudioOverview, StudioProject,
-    ShotFramingOverview,ShotFramingUpdate,ShotFramingResult)
+    ProjectReferenceVideoConfig, ShotFramingOverview,ShotFramingUpdate,ShotFramingResult)
 from app.schemas_product_library import ShotProductReferencesEdit
 from app.services.studio_pipeline import create_pipeline, latest_run, overview, project_list, _capture_services
 from app.services.screenplay_production_status import sync_production_status
@@ -45,6 +46,94 @@ from app.schemas_product_library import ProductionPreferenceEdit
 def edit_production_preferences(project_id:str,payload:ProductionPreferenceEdit,session:Session=Depends(get_db)):
     from app.services.studio_audio_policy import save_preferences
     return save_preferences(session,project_id,payload)
+
+
+@router.get('/projects/{project_id}/reference-videos')
+def project_reference_videos(project_id: str, session: Session = Depends(get_db)):
+    """Return only the project's explicit defaults and per-shot overrides."""
+    from app.services.project_reference_videos import project_config
+    return project_config(session, project_id)
+
+
+@router.get('/projects/{project_id}/reference-videos/library')
+def project_reference_video_library(project_id: str, session: Session = Depends(get_db)):
+    from app.services.project_reference_videos import explicit_project_library
+    return explicit_project_library(session, project_id)
+
+
+@router.get('/projects/{project_id}/reference-videos/available')
+def available_project_reference_videos(project_id: str, session: Session = Depends(get_db)):
+    """Browse the reusable video library without implicitly granting access."""
+    from app.services.project_reference_videos import available_library
+    return available_library(session, project_id)
+
+
+@router.post('/projects/{project_id}/reference-videos/{video_id}/attach', status_code=201)
+async def attach_project_reference_video(project_id: str, video_id: str, request: Request,
+                                         session: Session = Depends(get_db)):
+    """Explicitly grant one existing library video to this project."""
+    from app.services.project_reference_videos import attach_existing_video
+    from app.services.studio_project_guard import project_guard
+    async with project_guard(request.app, project_id):
+        try:
+            session.expire_all()
+            item = attach_existing_video(session, project_id, video_id)
+            session.commit()
+            return {'item': item}
+        except Exception:
+            session.rollback()
+            raise
+
+
+@router.put('/projects/{project_id}/reference-videos')
+async def save_project_reference_videos(project_id: str, payload: ProjectReferenceVideoConfig,
+                                        request: Request, session: Session = Depends(get_db)):
+    from app.services.project_reference_videos import save_project_config
+    from app.services.studio_project_guard import project_guard
+    async with project_guard(request.app, project_id):
+        try:
+            session.expire_all()
+            result = save_project_config(session, project_id, payload)
+            session.commit()
+            return result
+        except Exception:
+            session.rollback()
+            raise
+
+
+@router.post('/projects/{project_id}/reference-videos/upload', status_code=201)
+async def upload_project_reference_video(project_id: str, request: Request, file: UploadFile = File(...),
+                                         session: Session = Depends(get_db)):
+    """Import a verified original and explicitly attach it to this project."""
+    from app.services import reference_video_analysis as library
+    from app.services.project_reference_videos import link_uploaded_video
+    from app.services.studio_project_guard import project_guard
+    async with project_guard(request.app, project_id):
+        item = None
+        duplicate = True
+        try:
+            if not session.get(m.Project, project_id):
+                raise AppError(404, 'project_missing', '项目不存在')
+            data = await file.read(library.MAX_BYTES + 1)
+            item, duplicate = await asyncio.to_thread(
+                library.import_video, session, request.app.state.settings, file.filename or '', data,
+                name='', category='', source_note='project-native-ref2va-upload', usage_scope='native_ref2va', commit=False,
+            )
+            link_uploaded_video(session, project_id, item.id)
+            session.commit()
+            return {'item': {**library.video_dto(session, item), 'linked_to_project': True},
+                    'duplicate': duplicate}
+        except Exception:
+            session.rollback()
+            if item is not None and not duplicate:
+                # The file belongs solely to this failed, uncommitted upload;
+                # no prior source or shared library entry is ever removed.
+                candidate = safe_media_path(request.app.state.settings.media_root, item.relative_path)
+                if candidate.is_file():
+                    candidate.unlink()
+            raise
+        finally:
+            await file.close()
 
 
 @router.get('/projects', response_model=list[StudioProject])
@@ -127,7 +216,7 @@ def _requeue_failed_node(entry):
         'error': entry.get('error'), 'actor': 'local-user',
     }]
     retained_child = entry.get('child_id') if entry.get('code') == 'output_quality_failed' else None
-    entry.pop('context_dispatch_wait', None)
+    entry.pop('native_dispatch_wait', None)
     entry.pop('retry_after', None)
     entry.update(status='pending', child_id=retained_child, error=None, code=None)
 
@@ -146,8 +235,6 @@ async def retry_product_references(project_id: str, payload: ProductReferenceRet
 
 
 def _retry_product_references(session, settings, project_id, payload):
-    from app.services.cinematic_quality import generation_inputs_hash
-    from app.services.context_production_inputs import collect_context_inputs
     from app.services.product_library import is_product_reference_error, reference_selection, save_reference_selection
 
     run = _run(session, project_id)
@@ -178,37 +265,10 @@ def _retry_product_references(session, settings, project_id, payload):
             raise AppError(409, 'product_binding_busy', '本批次暂停时仍有其他待执行节点，请先处理这些节点')
 
     shot = session.get(m.StoryboardShot, shot_id)
-    by_shot = copy.deepcopy(run.snapshot_json.get('h3_context_by_shot', {}))
-    references_changed = bool(run.snapshot_json.get('product_references_changed'))
-
-    def changed_frozen_shots():
-        changed = []
-        for target in set(run.snapshot_json.get('shot_ids', [])) | set(by_shot):
-            captured = by_shot.get(target, {}).get('inputs') or {}
-            original_shot = session.get(m.StoryboardShot, target)
-            if (not original_shot or original_shot.project_id != project_id or not captured
-                    or original_shot.revision != captured.get('shot_revision')
-                    or generation_inputs_hash(session, original_shot) != captured.get('generation_inputs_hash')):
-                changed.append(target)
-        return sorted(changed)
-
-    if references_changed:
-        changed = changed_frozen_shots()
-        if changed:
-            raise AppError(409, 'studio_product_retry_inputs_changed',
-                '本批次的分镜参考已另行修改，请先用「开始／增量续作」应用修改后再处理这些镜头：'+'、'.join(changed),
-                {'run_id': run.id, 'shot_ids': changed})
-    frozen = by_shot.get(shot_id, {})
-    before = frozen.get('inputs')
-    workflow = frozen.get('service', {}).get('h3_workflow')
-    previous = child.parameters_json or {}
-    if (not shot or shot.project_id != project_id or not before or not workflow
-            or previous.get('h3_workflow') != workflow
-            or (previous.get('context_inputs') or {}).get('fingerprint') != before.get('fingerprint')):
-        raise AppError(409, 'studio_retry_context_unavailable', '失败镜头缺少本项目的原始 Context-IR 输入快照')
-    if (shot.revision != before.get('shot_revision')
-            or generation_inputs_hash(session, shot) != before.get('generation_inputs_hash')):
-        raise AppError(409, 'studio_retry_context_changed', '上次失败后本镜素材或制作内容已变化，请核对后新建增量制作')
+    if not shot or shot.project_id != project_id or shot.status == 'deleted':
+        raise AppError(409, 'studio_product_retry_scope', '原分镜已变化或不存在；请创建新的制作批次')
+    # Requeueing always uses the current run's direct native H3 snapshot; the
+    # retained failed child is evidence only and can never select a legacy path.
 
     saved = {item['product_id']: item for item in reference_selection(session, project_id, shot_id)['products']}
     if len(payload.products) != len(saved) or {item.product_id for item in payload.products} != set(saved):
@@ -221,30 +281,13 @@ def _retry_product_references(session, settings, project_id, payload):
     save_reference_selection(session, project_id, shot_id, ShotProductReferencesEdit(products=payload.products),
                              settings=settings, commit=False, allow_stalled_run=True)
     session.flush()
-    current = collect_context_inputs(session, settings, shot, prompt_override=before.get('prompt_override'),
-        instruction=before.get('instruction'), image_ids=before.get('explicit_visual_ids'),
-        motion_values=before.get('explicit_motion'), audio_policy=before.get('audio_policy'))
-
-    def other_references(inputs):
-        return [{key: value for key, value in record.items() if key != 'picture_index'}
-                for record in inputs.get('references', []) if record.get('role') != 'product']
-
-    unchanged_fields = ('shot_revision', 'script_revision_id', 'duration_seconds', 'aspect_ratio',
-                        'negative_prompt', 'motion_references', 'revision_constraints', 'effective_cinematography')
-    if (any(before.get(key) != current.get(key) for key in unchanged_fields)
-            or other_references(before) != other_references(current)):
-        raise AppError(409, 'studio_retry_context_changed', '本镜其他素材或制作内容已变化，请核对后新建增量制作')
-    frozen['inputs'] = current
     _requeue_failed_node(node)
-    run.snapshot_json = {**run.snapshot_json, 'h3_context_by_shot': by_shot}
-    if references_changed:
-        run.snapshot_json = {**run.snapshot_json, 'product_references_changed': bool(changed_frozen_shots())}
     run.nodes_json = nodes
     run.status = 'queued'
     run.error_message = None
     session.add(m.AuditEvent(object_type='studio_run', object_id=run.id, action='product_reference_video_retry_requested',
         details_json={'node_id': node['id'], 'shot_id': shot_id, 'previous_child_id': child.id,
-            'previous_input_fingerprint': before['fingerprint'], 'current_input_fingerprint': current['fingerprint']}))
+            'route': 'native_h3_direct', 'changed_product_reference_ids': [item.product_id for item in payload.products]}))
     sync_production_status(session, run)
     session.commit()
     return overview(session, project_id)
@@ -331,51 +374,23 @@ def retry(project_id: str, payload: dict | None = None, session: Session = Depen
         raise AppError(409, 'studio_retry_scope', '指定节点中有节点已经恢复或不在本轮失败列表')
     if any(n['status'] == 'unknown' for n in selected):
         raise AppError(409, 'studio_unknown_not_retryable', '含结果未知的请求；请先核对原服务任务，系统未重复提交以避免重复费用')
-    refresh = options.get('refresh_context_for', [])
-    if (not isinstance(refresh, list) or not all(isinstance(value, str) for value in refresh)
-            or set(refresh) - {n['id'] for n in selected if n['kind'] == 'video' and n.get('code') != 'output_quality_failed'}):
-        raise AppError(422, 'studio_retry_context_scope', '只可重新核对本次所选的失败视频输入')
-    refreshed = {}
-    if refresh:
-        from app.services.context_production_inputs import collect_context_inputs
-
-        if not settings or not run.snapshot_json.get('context_production'):
-            raise AppError(409, 'studio_retry_context_unavailable', '仅本地 Context-IR 制作可以重新核对失败镜头的素材')
-        by_shot = copy.deepcopy(run.snapshot_json.get('h3_context_by_shot', {}))
-        for node in selected:
-            if node['id'] not in refresh:
-                continue
-            shot = session.get(m.StoryboardShot, node['target_id'])
-            frozen = by_shot.get(node['target_id'], {})
-            before = frozen.get('inputs')
-            if not shot or shot.project_id != project_id or not before or not frozen.get('service', {}).get('h3_workflow'):
-                raise AppError(409, 'studio_retry_context_unavailable', '失败镜头缺少本项目的原始输入快照')
-            if shot.revision != before.get('shot_revision'):
-                raise AppError(409, 'studio_retry_context_changed', '分镜已经修改，请新建增量制作以应用新的内容')
-            current = collect_context_inputs(session, settings, shot, prompt_override=before.get('prompt_override'),
-                instruction=before.get('instruction'), image_ids=before.get('explicit_visual_ids'),
-                motion_values=before.get('explicit_motion'), audio_policy=before.get('audio_policy'))
-            if current.get('generation_inputs_hash') != before.get('generation_inputs_hash'):
-                raise AppError(409, 'studio_retry_context_changed', '原分镜素材或制作内容已经修改，请使用增量制作')
-            if current['fingerprint'] != before['fingerprint']:
-                refreshed[node['id']] = {'previous': before['fingerprint'], 'current': current['fingerprint']}
-                frozen['inputs'] = current
-        run.snapshot_json = {**run.snapshot_json, 'h3_context_by_shot': by_shot}
-    context_ids = set(run.snapshot_json.get('h3_context_by_shot', {}))
-    if not run.snapshot_json.get('context_production') or any(
-            shot_id not in context_ids for shot_id in run.snapshot_json.get('shot_ids', [])):
-        snapshots, errors = _capture_services(session, project_id)
-        changed_cloud = any(v['is_cloud'] for k, v in snapshots.items() if run.snapshot_json.get('services', {}).get(k, {}).get('service_id') != v['service_id'] or run.snapshot_json.get('services', {}).get(k, {}).get('service_revision') != v['service_revision'])
-        if changed_cloud:
-            raise AppError(409, 'studio_cloud_scope_changed', '云端服务或密钥设置已改变，请通过重新启动确认新服务的本轮费用范围')
-        run.snapshot_json = {**run.snapshot_json, 'services': snapshots, 'service_errors': errors}
+    # A retry must keep its frozen service and native reference inputs.  For
+    # historical runs that have no frozen route, refresh only local metadata
+    # and refuse a changed cloud scope rather than silently changing cost.
+    snapshots, errors = _capture_services(session, project_id)
+    changed_cloud = any(v['is_cloud'] for k, v in snapshots.items()
+                        if run.snapshot_json.get('services', {}).get(k, {}).get('service_id') != v['service_id']
+                        or run.snapshot_json.get('services', {}).get(k, {}).get('service_revision') != v['service_revision'])
+    if changed_cloud:
+        raise AppError(409, 'studio_cloud_scope_changed', '云端服务或密钥设置已改变，请通过重新启动确认新服务的本轮费用范围')
+    run.snapshot_json = {**run.snapshot_json, 'services': snapshots, 'service_errors': errors}
     from app.services.studio_quality_apply import refresh_upscale_routes_for_retry
     quality_routes = refresh_upscale_routes_for_retry(session, settings, run, selected) if settings else {}
     for n in selected:
         _requeue_failed_node(n)
     run.nodes_json = nodes; run.status = 'queued'; run.error_message = None
     session.add(m.AuditEvent(object_type='studio_run', object_id=run.id, action='failed_nodes_retry_requested',
-                             details_json={'node_ids': [n['id'] for n in selected], 'refreshed_context': refreshed,
+                             details_json={'node_ids': [n['id'] for n in selected], 'native_reference_snapshots_preserved': True,
                                            'refreshed_upscale_routes': quality_routes}))
     sync_production_status(session, run)
     session.commit(); return overview(session, project_id)
@@ -407,7 +422,7 @@ async def _repair(project_id: str, request: Request, session: Session):
     """Diagnose a stuck run and resume only tasks with a known-safe next step."""
     from app.services.gpu_gate import owned_model_status
     from app.services.studio_pipeline import RUN_TERMINAL, advance_pipeline
-    from app.services.studio_model_recovery import recover_model_connections, interrupted_context_nodes
+    from app.services.studio_model_recovery import recover_model_connections, interrupted_native_nodes
 
     original_run_id = _run(session, project_id).id
     model_connections = await recover_model_connections(request.app, session)
@@ -419,7 +434,7 @@ async def _repair(project_id: str, request: Request, session: Session):
     recovery = {}
     if (run.id == original_run_id and not run.snapshot_json.get('product_references_changed')
             and run.status not in (RUN_TERMINAL - {'completed_with_errors'}) | {'paused'} and gpu['state'] == 'idle'):
-        recovery = await interrupted_context_nodes(session, run, model_connections)
+        recovery = await interrupted_native_nodes(session, run, model_connections)
         session.expire_all()
         run = _run(session, project_id)
     def report(actions, blockers):
@@ -436,7 +451,7 @@ async def _repair(project_id: str, request: Request, session: Session):
     recoverable_characters = []
     nodes = copy.deepcopy(run.nodes_json or [])
     if recovery and run.status not in (RUN_TERMINAL - {'completed_with_errors'}) | {'paused'}:
-        requeued = _resume_context_after_connection_repair(session, request.app.state.settings, run, nodes, recovery)
+        requeued = _resume_native_after_connection_repair(session, request.app.state.settings, run, nodes, recovery)
         if requeued:
             run.nodes_json = nodes
             run.status = 'queued'
@@ -607,7 +622,7 @@ async def _repair(project_id: str, request: Request, session: Session):
                         'visual_id': queued_visual.id})
     elif gpu['state'] == 'busy':
         actions.append({'code': 'gpu_in_use', 'status': 'waiting',
-                        'message': '本地Qwen正占用GPU；保留原视觉队列，后台会在GPU空闲后继续。',
+                        'message': '本机模型正占用GPU；保留原视觉队列，后台会在GPU空闲后继续。',
                         'visual_id': queued_visual.id})
     elif gpu['state'] == 'unknown':
         actions.append({'code': 'gpu_health_unknown', 'status': 'blocked',
@@ -672,7 +687,7 @@ async def _repair(project_id: str, request: Request, session: Session):
     return report(actions, blockers)
 
 
-def _resume_context_after_connection_repair(session, settings, run, nodes, recovery):
+def _resume_native_after_connection_repair(session, settings, run, nodes, recovery):
     from app.core.paths import safe_media_path
     from app.models.entities import utcnow
     from app.services.cinematic_quality import generation_inputs_hash
@@ -703,7 +718,7 @@ def _resume_context_after_connection_repair(session, settings, run, nodes, recov
             continue
         if job and job.provider_job_id:
             job.status = 'failed'
-            job.error_code = 'context_ir_worker_restarted'
+            job.error_code = 'native_h3_worker_restarted'
             job.error_message = '本机 ComfyUI 工作进程已重启，原任务未留下视频输出。'
             job.finished_at = utcnow()
             job.parameters_json = {**job.parameters_json, 'native_restart_recovery': receipt}

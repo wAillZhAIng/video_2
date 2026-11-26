@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.core.errors import AppError
 from app.services.ai_services import service_snapshot
+from app.services.providers import native_ref2va_workflow_path
 from app.services.runtime_registry import file_sha
 
 
@@ -16,14 +17,10 @@ def binding(settings, service, model, slot):
     snapshot.pop('name')
     data = {'slot': slot, 'service': snapshot}
     if service.provider == 'comfyui' and slot in {'video_generation', 'motion_driving'}:
-        if service.settings_json.get('h3_context_ir') is True:
-            from app.services.h3_workflow_router import freeze_workflow
-            data['workflows'] = [
-                freeze_workflow(mode)['workflow_sha256'] for mode in ('fast', 'standard', 'high')
-            ]
-        else:
-            path = service.settings_json.get('workflow_path') or settings.h3_workflow_api_json
-            data['workflows'] = [file_sha(Path(path))]
+        data['workflows'] = [
+            {'steps': steps, 'sha256': file_sha(native_ref2va_workflow_path({'steps': steps}))}
+            for steps in (4, 20, 30)
+        ]
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
