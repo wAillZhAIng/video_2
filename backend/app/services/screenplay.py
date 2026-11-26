@@ -220,10 +220,17 @@ def generation_inputs(session, shot, settings):
         composition_direction = 'Use its framing and scene content as visual guidance. '
         retention_direction = 'the written shot defines the visible subjects and action.'
     cinematic=compile_context(session,shot,settings)
+    # Reference transport is schema-agnostic: the canonical preflight resolves
+    # approved scene/keyframe images for every script type.  The optional
+    # cinematic compiler only enriches metadata; it never decides whether an
+    # otherwise valid reference reaches native H3.
     if cinematic:
         bundle['cinematic']=cinematic
+    from app.services.cinematic_quality import shot_preflight
+    visual_ids=shot_preflight(session,settings,shot,require_visual=False)['visual_ids']
+    if visual_ids:
         from app.models import ProductionVisual
-        for identifier in cinematic['preflight']['visual_ids']:
+        for identifier in visual_ids:
             visual=session.get(ProductionVisual,identifier)
             if policy=='independent_faces_scene' and visual.kind=='keyframe':
                 excluded.append({'asset_id':visual.id,'sha256':visual.sha256,'role':'composition','reason':'experimental identity-isolation route excludes synthesized group faces; source layout/positions remain text, not a pixel-first-frame constraint'})
