@@ -91,7 +91,7 @@ def build_visual(session,settings,project_id,payload,uploaded=False):
                 'excluded':[],'selection_policy':'使用本镜明确保存的关键画面参考选择；不自动截断'}
             for product in selected:
                 references.append({**product,'asset_id':product['id'],'role':'product','picture_index':len(references)+1})
-                definitions.append(f"Reference image {len(references)} defines only product {product['product_id']} ({product['product_name']}). Preserve its shape, proportions, color and packaging. These photos are the appearance authority over conflicting generic descriptions. Follow the shot for actions and open/closed state; do not copy incidental background people or hands. "+("Never transfer product features onto a person's face. " if actors else "Display the product alone, without people or hands. ")+"Logo and packaging text require human checking or compositing from the original image.")
+                definitions.append(f"Reference image {len(references)} defines only product {product['product_id']} ({product['product_name']}). Preserve its shape, proportions, color and packaging. These photos are the appearance authority over conflicting generic descriptions. Follow the shot for actions and open/closed state; do not copy incidental background people or hands. "+("Never transfer product features onto a person's face. " if actors else "Follow the written shot for people, hands and physical interactions. ")+"Logo and packaging text require human checking or compositing from the original image.")
     elif scene:
         script=session.get(m.ScriptRevision,scene.script_revision_id) if scene.script_revision_id else None
         if script:rules=script.parsed_json.get('rules_snapshot') or rules
@@ -133,7 +133,7 @@ def build_visual(session,settings,project_id,payload,uploaded=False):
     product_only=bool(shot and not actors and any(r.get('role')=='product' for r in references))
     language_keys=['scene','camera'] if payload.kind=='scene_reference' or product_only else ['identity','wardrobe','scene','action','camera']
     role='EMPTY, UNOCCUPIED LOCATION SCOUTING PHOTOGRAPH. Absolutely no people, human silhouettes, faces or hands; show only the usable location. ' if payload.kind=='scene_reference' else 'Show only the explicitly referenced performers in this shot. '
-    if product_only:role='PRODUCT-ONLY LIVE-ACTION ADVERTISEMENT. Show the referenced product alone on the specified surface. Absolutely no people, faces, hands, human silhouettes, actors or mannequins. '
+    if product_only:role='LIVE-ACTION PRODUCT ADVERTISEMENT. Preserve the referenced product and follow the written shot for people, hands and physical interactions. '
     contact=physical_directions(context,performer_names) if payload.kind=='keyframe' else ''
     if shot:
         # Keep the full source/IDs in the snapshot, but render only visual facts
@@ -162,7 +162,7 @@ def build_visual(session,settings,project_id,payload,uploaded=False):
 
 def visual_graph(visual,uploaded):
     job=SimpleNamespace(id=visual.id,prompt=visual.prompt,negative_prompt='illustration, animation, anime, CGI, 3D render, plastic skin, doll, glamour retouch, watermark, collage',seed=visual.snapshot_json['seed'],snapshot_json=visual.snapshot_json)
-    if visual.snapshot_json.get('product_only'):job.negative_prompt+=', person, people, face, human, hand, actor, mannequin'
+    # Product references do not prohibit people or hands specified by the script.
     if uploaded:graph=native_graph(job,uploaded[0])
     else:graph=klein_text2image_graph(job)
     for index,filename in enumerate(uploaded[1:],1):

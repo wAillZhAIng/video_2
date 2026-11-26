@@ -84,6 +84,18 @@ def test_dag_stable_scope_double_start_does_not_duplicate_jobs(studio):
     assert project_list(s)[0]['shot_count']==3
 
 
+def test_native_h3_dag_uses_script_and_identity_without_synthetic_keyframes(studio):
+    s = studio.session
+    service = s.scalar(select(m.AIService).where(m.AIService.module == 'video_generation'))
+    service.default_model = 'minimax_h3_ref2va_pruned_w6a8.safetensors'
+    s.commit()
+    run = create_pipeline(s, studio.settings, studio.project.id, {})
+    assert set(run.snapshot_json['direct_native_shot_ids']) == {shot.id for shot in studio.shots}
+    assert not any(n['kind'] in {'scene', 'keyframe'} for n in run.nodes_json)
+    assert all(all(dep.startswith('character:') for dep in n['dependencies'])
+        for n in run.nodes_json if n['kind'] == 'video')
+
+
 def test_missing_image_service_blocks_dependent_shots_but_video_plan_persists(studio):
     s=studio.session
     service=s.scalar(select(m.AIService).where(m.AIService.module=='character_generation'));service.enabled=False;s.commit()
@@ -226,7 +238,7 @@ def test_pipeline_reaches_real_generation_input_boundary_with_durable_dispatch(s
                 stored=persisted.get(StudioRun,request.parameters['studio_run_id'])
                 actual=next(n for n in stored.nodes_json if n['id']==request.parameters['studio_node_id'])
                 assert actual['status']=='dispatching' and actual['attempts']==len(submitted)+1
-                assert actual['seed']==request.seed==video_seed(stored.id,request.shot_id,actual['attempts'])
+                assert actual['seed']==request.seed==video_seed(stored.id,request.shot_id,1)
             assert request.reference_assets
             if override is None:assert 'subject_definitions:' in request.prompt
             else:assert request.prompt == override
@@ -237,6 +249,7 @@ def test_pipeline_reaches_real_generation_input_boundary_with_durable_dispatch(s
         service,snapshot=resolve_service(session,'video_generation',service_id,project_id)
         return service,snapshot,ContractProvider()
     monkeypatch.setattr(video_services,'select_video_service',select_contract)
+    monkeypatch.setattr(video_services,'existing_provider',lambda *args: ContractProvider())
     r=create_pipeline(s,studio.settings,studio.project.id,{'shot_ids':[studio.shots[0].id], 'prompt_overrides':{studio.shots[0].id:override} if override is not None else {}});s.commit()
     for _ in range(6):
         tick(studio,r)
@@ -244,17 +257,16 @@ def test_pipeline_reaches_real_generation_input_boundary_with_durable_dispatch(s
             store_visual(s,studio.settings,visual,png())
         s.commit()
         if submitted:break
-    assert len(submitted)==1
+    assert len(submitted)==1, [(n['kind'],n['status'],n.get('code'),n.get('error')) for n in r.nodes_json]
     video_node=next(n for n in r.nodes_json if n['kind']=='video');job=s.get(m.GenerationJob,video_node['child_id'])
     assert job.parameters_json['studio_run_id']==r.id and len(job.reference_assets_json)==5
-    assert job.parameters_json['screenplay_snapshot']['cinematic']['preflight']['ready']
-    assert job.parameters_json['screenplay_snapshot']['cinematic']['preflight']['generation_inputs_hash']==generation_inputs_hash(s,studio.shots[0])
+    assert job.parameters_json['generation_inputs_hash']==generation_inputs_hash(s,studio.shots[0])
     assert job.status=='queued' and r.status=='running'
     original_id,original_seed=job.id,job.seed
     assert original_seed==video_seed(r.id,studio.shots[0].id,1)
     tick(studio,r);assert len(submitted)==1
-    # A definitive temporary failure creates a new attempt and new seed. The
-    # original persisted job keeps its actual seed and remains reproducible.
+    # A definitive temporary failure retries the frozen input with the same
+    # seed. A new production run still has its own independently derived seed.
     job.status='failed';job.error_code='provider_unavailable';job.error_message='HTTP503 definite failure';s.commit()
     tick(studio,r)
     nodes=copy.deepcopy(r.nodes_json);retry=next(n for n in nodes if n['kind']=='video')
@@ -262,7 +274,7 @@ def test_pipeline_reaches_real_generation_input_boundary_with_durable_dispatch(s
     retry['retry_after']=0;r.nodes_json=nodes;s.commit();tick(studio,r)
     assert len(submitted)==2
     current=next(n for n in r.nodes_json if n['kind']=='video');second=s.get(m.GenerationJob,current['child_id'])
-    assert second.id!=original_id and second.seed==video_seed(r.id,studio.shots[0].id,2) and second.seed!=original_seed
+    assert second.id!=original_id and second.seed==original_seed
     assert s.get(m.GenerationJob,original_id).seed==original_seed
     assert len([n for n in r.nodes_json if n['kind']=='video'])==1  # scoped run never dispatches unrelated shots
 
@@ -559,6 +571,7 @@ def test_video_reuse_requires_the_same_edited_prompt(studio, monkeypatch, previo
     session = studio.session
     job = m.GenerationJob(project_id=studio.project.id, shot_id=shot.id, provider='contract-fixture',
         status='generated', prompt='fixture body', parameters_json={'prompt_override':previous_override,
+            'generation_inputs_hash':'same-inputs',
             'screenplay_snapshot':{'cinematic':{'preflight':{'generation_inputs_hash':'same-inputs'}}}})
     session.add(job);session.flush()
     video = m.VideoRevision(project_id=studio.project.id, shot_id=shot.id, generation_job_id=job.id,
@@ -576,3 +589,18 @@ def test_video_reuse_requires_the_same_edited_prompt(studio, monkeypatch, previo
     asyncio.run(pipeline._video(studio.app, session, studio.settings, run, entry, False))
     assert entry.get('reused', False) is reused
     assert (entry.get('child_id') == job.id) is reused
+
+
+def test_imported_empty_motion_list_preserves_project_video_default(studio, monkeypatch):
+    from app.services import motion_references
+    detail = studio.session.scalar(select(m.ShotDetail).where(m.ShotDetail.shot_id == studio.shots[0].id))
+    detail.source_json = {'production': {'motion_references': []}}
+    default = [{'video_id': 'project-reference', 'expected_revision': 1, 'source_sha256': 'a'*64,
+        'trim_start_seconds': 0.0, 'trim_end_seconds': 16.0, 'authorized_for_reference': True}]
+    seen = {}
+    def resolve(session, settings, shot, values):
+        seen[shot.id] = values
+        return []
+    monkeypatch.setattr(motion_references, 'resolve_motion_references', resolve)
+    create_pipeline(studio.session, studio.settings, studio.project.id, {'reference_video_defaults': default})
+    assert [{key: value[key] for key in default[0]} for value in seen[studio.shots[0].id]] == default

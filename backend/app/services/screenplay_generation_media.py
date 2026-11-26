@@ -14,12 +14,12 @@ from app.models.screenplay_generation import ScreenplayInputAsset
 
 LIMITS={'text':{'max_characters':40000,'formats':[]},
     'image':{'max_bytes':10*1024**2,'max_pixels':20_000_000,'formats':['.png','.jpg','.jpeg','.webp']},
-    'video':{'max_bytes':100*1024**2,'max_duration_seconds':60,'max_frames':8,'formats':['.mp4','.mov','.mkv','.webm']}}
+    'video':{'max_bytes':100*1024**2,'max_frames':8,'formats':['.mp4','.mov','.mkv','.webm']}}
 
 def sha(data):return hashlib.sha256(data).hexdigest()
 
-def run(arguments, timeout=120):
-    result=subprocess.run([str(a) for a in arguments],capture_output=True,shell=False,timeout=timeout,
+def run(arguments):
+    result=subprocess.run([str(a) for a in arguments],capture_output=True,shell=False,
         creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     if result.returncode:raise AppError(422,'screenplay_media_decode','素材无法完整读取或解码')
     return result.stdout
@@ -67,12 +67,12 @@ def upload_asset(session,settings,input_mode,filename,data,source_note='',*,comm
     with path.open('xb') as stream:stream.write(data)
     try:
         if input_mode=='video':
-            raw=json.loads(run([settings.ffprobe_path,'-v','error','-show_streams','-show_format','-of','json',path],30))
+            raw=json.loads(run([settings.ffprobe_path,'-v','error','-show_streams','-show_format','-of','json',path]))
             video=next((s for s in raw['streams'] if s.get('codec_type')=='video'),None)
             duration=float(raw.get('format',{}).get('duration',0))
-            if not video or not 0<duration<=60 or int(video.get('width',0))*int(video.get('height',0))>20_000_000:
-                raise AppError(422,'screenplay_video_limits','视频需要有效画面，时长不超过60秒，像素不超过2000万')
-            run([settings.ffmpeg_path,'-nostdin','-v','error','-xerror','-i',path,'-f','null','-'],180)
+            if not video or not 0<duration or int(video.get('width',0))*int(video.get('height',0))>20_000_000:
+                raise AppError(422,'screenplay_video_limits','视频需要有效画面，像素不超过2000万')
+            run([settings.ffmpeg_path,'-nostdin','-v','error','-xerror','-i',path,'-f','null','-'])
             metadata.update(duration_seconds=duration,width=int(video['width']),height=int(video['height']),
                 has_audio=any(s.get('codec_type')=='audio' for s in raw['streams']),full_decode=True)
             asset.metadata_json=metadata
@@ -110,8 +110,7 @@ def prepare_reference_audio(settings, job, video, expected_sha):
         raise AppError(409, 'screenplay_source_changed', '冻结的主参考视频已变化，未提取音轨')
     directory = safe_media_path(settings.media_root,f'screenplay_jobs/{job.id}/source_frames')
     directory.mkdir(parents=True,exist_ok=True)
-    return {**extract_source_audio(settings,path,directory,60),'audio_reference_video_id':video.id,
-            'audio_sample_limit_seconds':60}
+    return {**extract_source_audio(settings,path,directory),'audio_reference_video_id':video.id}
 
 
 def prepare_source(settings,job,asset):

@@ -556,10 +556,7 @@ class ComfyUIH3Provider:
         prepared=[]
         if request.motion_references:
             if len(request.motion_references)>3:raise AppError(422,'motion_reference_limit','动作参考最多3条')
-            from app.services.motion_references import h3_generation_frame_budget, prepare_motion_reference
-            frame_budget = h3_generation_frame_budget(request.duration_seconds)
-            if any(reference.get('effective_frames') != frame_budget for reference in request.motion_references):
-                raise AppError(409, 'motion_reference_frame_budget', '参考视频帧预算与本次 H3 生成长度不一致，未提交生成')
+            from app.services.motion_references import prepare_motion_reference
             loop=asyncio.get_running_loop()
             lock=_motion_preprocess_locks.setdefault(loop,asyncio.Lock())
             async with lock:
@@ -576,8 +573,8 @@ class ComfyUIH3Provider:
             self._set_path(prompt, negative_path, request.negative_prompt)
         length_path = metadata.get("length_path")
         if length_path:
-            from app.services.motion_references import h3_generation_frame_budget
-            self._set_path(prompt, length_path, h3_generation_frame_budget(request.duration_seconds))
+            frames = max(5, round(request.duration_seconds * 24))
+            self._set_path(prompt, length_path, frames + (5 - frames % 17) % 17)
         seed_path = metadata.get("seed_path")
         if seed_path and request.seed is not None:
             self._set_path(prompt, seed_path, request.seed)
@@ -671,7 +668,6 @@ class ComfyUIH3Provider:
                             'effective_duration_seconds':ref['effective_duration_seconds'],
                             'selected_duration_seconds':ref.get('selected_duration_seconds'),
                             'source_frame_count_at_24fps':ref.get('source_frame_count_at_24fps'),
-                            'sampling':copy.deepcopy(ref.get('sampling')),
                             'reference_role':ref.get('reference_role','combined'),'processed':processed,
                             'workflow_slot':f'ref_videos.ref_video_{index}','load_video_node':load,
                             'components_node':components,'actual_uploaded_video':filename,'audio_included':include_audio,

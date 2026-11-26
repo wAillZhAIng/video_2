@@ -167,7 +167,7 @@ export function ProjectReferenceVideos({ projectId, shots, disabled, onStateChan
       setOverrides(nextOverrides);
       if (!nextDefaults.length && !Object.keys(nextOverrides).length && visible.filter(video => video.state === 'active').length === 1) {
         const only = visible.find(video => video.state === 'active');
-        if (only && usableDuration(only) >= 2) {
+        if (only && usableDuration(only) > 0) {
           setDefaults([newBinding(only)]);
           setNotice('已为全部分镜预填当前唯一的参考视频。请保存，或为某个镜头设置覆盖。');
         }
@@ -283,7 +283,7 @@ export function ProjectReferenceVideos({ projectId, shots, disabled, onStateChan
   const locked = disabled || busy || loading;
   return <section className="project-reference-videos" aria-label="可选参考视频">
     <div className="studio-section-heading"><div><h3>参考视频（可选）</h3><p>视频直接预处理为 24 fps 帧序列并接入 MiniMax H3 的原生 <code>ref_video_N</code> 输入。它不替代产品／人物图片；默认不使用原视频音轨。</p></div><button type="button" className="button button-secondary button-small" disabled={locked} onClick={() => setReload(value => value + 1)}>重新读取</button></div>
-    <p className="form-hint">最多 3 段，每段可选择原视频中的任意有效范围。长片段会覆盖整个所选区间均匀采样为 H3 原生帧输入。图片与视频独立编号，用户指令和产品／人物参考优先于视频中的主体。</p>
+    <p className="form-hint">最多 3 段，每段可选择原视频中的任意有效范围，时长不设上限。所选区间会按 24 fps 保留完整原始时序并接入 H3 原生帧输入。图片与视频独立编号，用户指令和产品／人物参考优先于视频中的主体。</p>
     {loading ? <p role="status">读取本项目可用的参考视频…</p> : null}
     {error ? <p role="alert" className="inline-notice warning">{error}</p> : null}
     {notice ? <p role="status" className="inline-notice">{notice}</p> : null}
@@ -295,7 +295,7 @@ export function ProjectReferenceVideos({ projectId, shots, disabled, onStateChan
     <fieldset>
       <legend>从已有视频素材库明确添加</legend>
       <p className="form-hint">浏览不会授权或继承素材；只有点击“添加到当前项目”后，该视频才可被本项目的分镜选择。</p>
-      {!availableLibrary ? <button type="button" className="button button-secondary button-small" disabled={locked} onClick={() => void loadExistingLibrary()}>读取已有视频素材库</button> : <div className="toolbar"><FormField label="已有素材库视频"><select value={existingChoice} disabled={locked} onChange={event => setExistingChoice(event.target.value)}><option value="">请选择</option>{availableLibrary.filter(video => video.state === 'active' && !video.linked_to_project && usableDuration(video) >= 2).map(video => <option key={video.id} value={video.id}>{video.name} · {usableDuration(video).toFixed(2)} 秒</option>)}</select></FormField><button type="button" className="button button-secondary button-small" disabled={locked || !existingChoice} onClick={() => void attachExisting()}>添加到当前项目</button></div>}
+      {!availableLibrary ? <button type="button" className="button button-secondary button-small" disabled={locked} onClick={() => void loadExistingLibrary()}>读取已有视频素材库</button> : <div className="toolbar"><FormField label="已有素材库视频"><select value={existingChoice} disabled={locked} onChange={event => setExistingChoice(event.target.value)}><option value="">请选择</option>{availableLibrary.filter(video => video.state === 'active' && !video.linked_to_project && usableDuration(video) > 0).map(video => <option key={video.id} value={video.id}>{video.name} · {usableDuration(video).toFixed(2)} 秒</option>)}</select></FormField><button type="button" className="button button-secondary button-small" disabled={locked || !existingChoice} onClick={() => void attachExisting()}>添加到当前项目</button></div>}
     </fieldset>
     <ReferenceBindingScope title="项目默认参考视频" bindings={defaults} videos={activeVideos} locations={locations} choice={defaultChoice} onChoice={setDefaultChoice}
       disabled={locked} onAdd={() => addBinding('default')} onUpdate={(index, binding) => updateBinding('default', index, binding)} onReplace={(index, videoId) => replaceBinding('default', index, videoId)} onRemove={index => removeBinding('default', index)} />
@@ -353,6 +353,6 @@ function ReferenceBindingScope({ title, bindings, videos, locations, choice, onC
       </article>;
     })}
     {problem ? <p role="alert">{problem}</p> : null}
-    <div className="toolbar"><FormField label="从本项目视频库选择"><select value={choice} disabled={disabled || bindings.length >= 3} onChange={event => onChoice(event.target.value)}><option value="">请选择</option>{videos.filter(video => usableDuration(video) >= 2 && !bindings.some(binding => binding.video_id === video.id)).map(video => <option key={video.id} value={video.id}>{video.name} · {usableDuration(video).toFixed(2)} 秒</option>)}</select></FormField><button type="button" className="button button-secondary button-small" disabled={disabled || !choice || bindings.length >= 3} onClick={onAdd}>添加视频</button></div>
+    <div className="toolbar"><FormField label="从本项目视频库选择"><select value={choice} disabled={disabled || bindings.length >= 3} onChange={event => onChoice(event.target.value)}><option value="">请选择</option>{videos.filter(video => usableDuration(video) > 0 && !bindings.some(binding => binding.video_id === video.id)).map(video => <option key={video.id} value={video.id}>{video.name} · {usableDuration(video).toFixed(2)} 秒</option>)}</select></FormField><button type="button" className="button button-secondary button-small" disabled={disabled || !choice || bindings.length >= 3} onClick={onAdd}>添加视频</button></div>
   </fieldset>;
 }

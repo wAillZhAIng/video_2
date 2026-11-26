@@ -34,7 +34,7 @@ def _public_reference(ref: dict[str, Any]) -> dict[str, Any]:
         'authorized_for_motion', 'authorized_for_reference',
         'target_character_id', 'effective_frames', 'effective_duration_seconds',
         'source_duration_seconds', 'selected_duration_seconds',
-        'source_frame_count_at_24fps', 'fps', 'source_has_audio', 'audio_included', 'sampling',
+        'source_frame_count_at_24fps', 'fps', 'source_has_audio', 'audio_included',
     )
     return {key: ref[key] for key in keys if key in ref}
 

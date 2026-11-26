@@ -201,10 +201,10 @@ def generation_inputs(session, shot, settings, *, allow_no_visual_references=Fal
         bundle['product_appearance_review']={'status':'needs_review','exact_logo_text_verified':False,
             'limitations':['产品参考图已进入实际输入；外观连续性、包装文字与Logo复现仍需人工审核，必要时后期叠加。']}
     if product_only:
-        shot_description = 'A product presentation shot showing the defined products. Do not add people or hands.'
+        shot_description = 'A product presentation shot following the written scene, including its specified people, hands and physical interactions.'
         photography_direction = 'product photography, practical lighting and physically grounded product movement.'
         production_heading = 'Product presentation and sound directions:'
-        composition_direction = 'Show the supplied products only, without adding performers. '
+        composition_direction = 'Preserve the supplied product identity and follow the written scene for people, hands and interactions. '
         retention_direction = 'each product retains its own supplied appearance.'
     elif actors:
         shot_description = 'A live-action dramatic shot with the defined characters. Reference roles apply to their respective subjects only.'
@@ -221,7 +221,8 @@ def generation_inputs(session, shot, settings, *, allow_no_visual_references=Fal
     # Reference transport is schema-agnostic: approved scene/keyframe images
     # enter the direct native H3 request for every script type.
     from app.services.cinematic_quality import shot_preflight
-    visual_ids=shot_preflight(session,settings,shot,require_visual=False)['visual_ids']
+    visual_ids=shot_preflight(session,settings,shot,require_visual=False,
+        include_generated_visuals=not allow_no_visual_references)['visual_ids']
     if visual_ids:
         from app.models import ProductionVisual
         for identifier in visual_ids:

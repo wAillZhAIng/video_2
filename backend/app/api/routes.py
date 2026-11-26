@@ -941,7 +941,7 @@ def _restore_frozen_motion_references(session: Session, settings: Settings, refe
     if len(references) > 3:
         raise AppError(409, 'retry_snapshot_incomplete', '原任务的参考视频数量超过当前 MiniMax H3 上限')
     restored = []
-    from app.services.motion_references import valid_reference_frame_count
+    from app.services.motion_references import reference_frame_count
     for reference in references:
         if not isinstance(reference, dict):
             raise AppError(409, 'retry_snapshot_incomplete', '原任务的参考视频快照不完整，无法安全重试')
@@ -954,13 +954,32 @@ def _restore_frozen_motion_references(session: Session, settings: Settings, refe
         if (not video or video.state != 'active' or video.revision != expected_revision
                 or video.sha256 != expected_sha256):
             raise AppError(409, 'retry_reference_changed', '原任务的参考视频已变化或不可用，未提交重试')
-        frame_count = reference.get('effective_frames')
-        duration = reference.get('effective_duration_seconds')
-        if (not valid_reference_frame_count(frame_count) or not isinstance(duration, (int, float))
-                or not math.isfinite(float(duration)) or float(duration) <= 0):
-            raise AppError(409, 'retry_snapshot_incomplete', '原任务的参考视频处理参数不完整，无法安全重试')
+        start = reference.get('trim_start_seconds')
+        end = reference.get('trim_end_seconds')
+        source_duration = (video.metadata_json or {}).get('duration_seconds')
+        if (not isinstance(start, (int, float)) or not isinstance(end, (int, float))
+                or not math.isfinite(float(start)) or not math.isfinite(float(end))
+                or float(start) < 0 or float(end) <= float(start)
+                or not isinstance(source_duration, (int, float))
+                or not math.isfinite(float(source_duration))
+                or float(end) > float(source_duration) + 1e-6):
+            raise AppError(409, 'retry_snapshot_incomplete', '原任务的参考视频选区无效或超出源视频范围，无法安全重试')
+        selected_duration = float(end) - float(start)
+        frame_count = reference_frame_count(selected_duration)
+        if reference.get('effective_frames', frame_count) != frame_count:
+            raise AppError(409, 'retry_reference_processing_changed',
+                '原任务使用旧版参考视频时间压缩快照，无法按当前完整帧模式原样重试；请新建制作任务以使用完整参考片段')
         source = safe_media_path(settings.media_root, video.relative_path, must_exist=True)
-        restored.append({**copy.deepcopy(reference), 'relative_path': video.relative_path, 'absolute_path': str(source)})
+        restored.append({
+            **copy.deepcopy(reference),
+            'relative_path': video.relative_path,
+            'absolute_path': str(source),
+            'selected_duration_seconds': selected_duration,
+            'source_frame_count_at_24fps': frame_count,
+            'effective_frames': frame_count,
+            'effective_duration_seconds': selected_duration,
+            'fps': 24,
+        })
     return restored
 
 

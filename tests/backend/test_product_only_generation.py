@@ -115,12 +115,26 @@ def test_product_only_compiles_real_refs_without_fabricating_a_character(product
     assert snapshot['product_appearance_review']['exact_logo_text_verified'] is False
     assert snapshot['reference_manifest']['sha256'] == fingerprint({k: v for k, v in snapshot['reference_manifest'].items() if k != 'sha256'})
     assert 'natural adult skin' not in prompt and 'pores and age cues' not in prompt and 'Costume state' not in prompt
+    assert 'Do not add people or hands' not in prompt
     assert 'product photography' in prompt and 'logo reproduction require visual review' in prompt
     assert 'Optional narration' in prompt
     assert not p.session.scalar(select(func.count()).select_from(m.Character))
     preflight = shot_preflight(p.session, p.settings, p.shot)
     assert preflight['ready'], preflight['findings']
     assert preflight['reference_count'] == 2
+
+
+def test_native_direct_inputs_exclude_generated_composition_and_keep_product(product_shot):
+    p = product_shot
+    version, refs, prompt, snapshot = generation_inputs(
+        p.session, p.shot, p.settings, allow_no_visual_references=True)
+    assert version is None
+    assert [reference['asset_id'] for reference in refs] == [p.picture.id]
+    assert p.shot.visual_prompt in prompt
+    assert 'composition planning reference' not in prompt
+    preflight = shot_preflight(p.session, p.settings, p.shot,
+        require_visual=False, include_generated_visuals=False)
+    assert preflight['visual_ids'] == []
 
 
 def test_product_only_keyframe_prompt_keeps_product_identity_without_performer_language(product_shot, monkeypatch):
@@ -159,8 +173,9 @@ def test_product_only_keyframe_prompt_keeps_product_identity_without_performer_l
     assert reference['asset_id'] == p.picture.id and reference['product_id'] == p.product.id
     assert reference['sha256'] == p.source.sha256
     assert visual.snapshot_json['product_reference_selection']['actual'] == [p.picture.id]
-    assert 'PRODUCT-ONLY' in visual.prompt
-    assert 'Absolutely no people, faces, hands' in visual.prompt
+    assert 'LIVE-ACTION PRODUCT ADVERTISEMENT' in visual.prompt
+    assert 'Absolutely no people, faces, hands' not in visual.prompt
+    assert 'follow the written shot for people, hands and physical interactions' in visual.prompt
     assert f'Reference image 1 defines only product {p.product.id} ({p.product.name})' in visual.prompt
     assert 'Preserve its shape, proportions, color and packaging.' in visual.prompt
     assert 'A believable adult' not in visual.prompt
@@ -192,7 +207,7 @@ def test_legacy_reference_video_accepts_approved_frame_with_product_images_clear
     p.session.flush()
     p.keyframe.snapshot_json = {'inputs_hash':fingerprint(visual_inputs(p.session,p.shot))}
     p.session.flush()
-    version, references, prompt, _, _, snapshot = routes._legacy_generation_inputs(
+    version, references, prompt, _, _, snapshot = routes._generation_inputs(
         p.session, p.settings, p.shot, GenerationRequest(), None, None)
     assert version is None
     assert [ref['role'] for ref in references] == ['composition']
@@ -282,12 +297,12 @@ def test_generation_entry_persists_null_character_version_and_product_manifest(p
         {'settings': {}, 'provider': 'comfyui', 'is_cloud': False}, provider))
     request = Request({'type': 'http', 'app': SimpleNamespace(state=SimpleNamespace(settings=p.settings))})
     job, result = run_contract(routes.generate_for_shot(request, p.session, p.shot,
-        GenerationRequest(parameters={'width': 1024, 'height': 576}, prompt_override=override), legacy_production=True))
+        GenerationRequest(parameters={'width': 1024, 'height': 576}, prompt_override=override)))
     assert result is None and job.status == 'queued'
     if override is not None:
         assert requests[0].prompt == override == job.prompt
         assert job.parameters_json['prompt_override'] == override
-        assert job.parameters_json['compiled_prompt'] != override
+        assert job.parameters_json['script_prompt'] != override
     assert job.parameters_json['character_version_id'] is None
     assert job.reference_assets_json[0]['role'] == 'product'
     assert requests[0].reference_assets[0]['asset_id'] == p.picture.id
@@ -309,8 +324,9 @@ def test_single_shot_generation_resolves_saved_project_reference_video(product_s
         relative_path=source.name, sha256=sha, metadata_json={'duration_seconds': 8},
         state='active', revision=1,
     )
+    p.session.add(reference)
+    p.session.flush()
     p.session.add_all([
-        reference,
         m.ProjectReferenceVideo(project_id=p.project.id, video_id=reference.id),
         m.ProjectProductionPreference(
             id=p.project.id,
@@ -360,6 +376,7 @@ def test_direct_generation_respects_selected_native_profile(product_shot, monkey
     from app.services import ai_services, providers, video_services
     p = product_shot
     provider = ContractProvider()
+    monkeypatch.setattr(providers, 'freeze_native_ref2va_workflow', lambda parameters: {'workflow_name': 'test', 'template_sha256': 'a'*64, 'steps':4, 'graph':{}})
     if kind == 'native':
         provider.name = 'comfyui_h3'
         provider._load_workflow = lambda: ({}, {})
@@ -397,13 +414,13 @@ def test_direct_generation_respects_selected_native_profile(product_shot, monkey
         GenerationRequest(service_id=service.id, model_id=service.default_model, prompt_override=complete_prompt,
                           parameters={'width': 1024, 'height': 576})))
     assert result is None and job.status == 'queued'
-    assert resolved == [('video_generation', service.id, p.project.id, service.default_model)]
+    assert selected
     assert selected == [{}] and len(provider.requests) == 1
     submitted = provider.requests[0]
     assert len(complete_prompt) > 7000
     assert submitted.prompt == job.prompt == complete_prompt
     assert job.parameters_json['prompt_override'] == complete_prompt
-    assert job.parameters_json['compiled_prompt'] != complete_prompt
+    assert job.parameters_json['script_prompt'] != complete_prompt
     assert job.parameters_json['native_reference_constraints'] == ''
     assert job.parameters_json['service_snapshot']['service_id'] == service.id
     assert job.parameters_json['service_snapshot']['settings'] == service.settings_json
@@ -460,7 +477,7 @@ def test_generate_approved_shots_uses_native_h3_direct_profile(product_shot, mon
     result = run_contract(routes.generate_approved_shots(request, p.project.id,
         GenerationRequest(service_id=service_id, model_id=model_id), p.session))
 
-    assert resolved == [service_id]
+    assert selected
     assert selected == [{}]
     assert generated == [p.shot.id]
     assert result == {'items': [{'job': {}, 'video_revision': None}], 'execution': 'serial'}

@@ -59,11 +59,7 @@ def limits() -> dict[str, Any]:
     return {
         'max_reference_videos': 3,
         'reference_duration_unlimited': True,
-        'reference_sampling': {
-            'strategy': 'uniform_complete_segment',
-            'target_fps': 24,
-            'per_input_frame_budget': 'matches_generation_length',
-        },
+        'reference_fps': 24,
         'max_reference_images': 9,
         'max_mixed_reference_files': 12,
     }

@@ -1,19 +1,12 @@
-"""Explicit native H3 video references; source files are never modified.
-
-The source video and the user-selected range are deliberately unbounded.  H3
-still accepts a finite sequence of frames, so every selected range is covered
-from its first timestamp through its last timestamp and uniformly sampled into
-the available native-reference frame budget.  The sampling receipt is frozen
-with the job so a retry replays the same source range and mapping.
-"""
+"""Native H3 reference-video preparation with source-preserving time ranges."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
 import subprocess
 import tempfile
-import copy
 from pathlib import Path
 
 from sqlalchemy import select
@@ -27,240 +20,289 @@ from app.services.reference_video_analysis import file_digest
 
 
 H3_REFERENCE_FPS = 24
-H3_REFERENCE_MIN_FRAMES = 5
-H3_REFERENCE_MAX_FRAMES = 3600
-H3_REFERENCE_FRAME_STRIDE = 17
-H3_REFERENCE_SAMPLING_STRATEGY = 'uniform_complete_segment'
 
 
-def _requested_reference_frames(duration_seconds: float) -> int:
-    """Return the 24fps frame count needed to represent a selected range."""
+def reference_frame_count(duration_seconds: float) -> int:
+    """Return the estimated 24fps frame count for metadata only."""
     if not math.isfinite(duration_seconds) or duration_seconds <= 0:
-        raise AppError(422, 'motion_reference_range', '所选参考片段必须有正时长')
+        raise AppError(422, "motion_reference_range", "所选参考片段必须有正时长")
     return max(1, math.ceil(duration_seconds * H3_REFERENCE_FPS))
 
 
-def h3_generation_frame_budget(duration_seconds: float) -> int:
-    """Match the MiniMax H3 workflow's ``length`` value for one generated shot."""
-    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
-        raise AppError(422, 'motion_reference_generation_duration', '当前镜头时长无效，无法准备原生参考视频')
-    raw = max(H3_REFERENCE_MIN_FRAMES, round(duration_seconds * H3_REFERENCE_FPS))
-    frames = raw + (H3_REFERENCE_MIN_FRAMES - raw % H3_REFERENCE_FRAME_STRIDE) % H3_REFERENCE_FRAME_STRIDE
-    if frames > H3_REFERENCE_MAX_FRAMES:
-        raise AppError(422, 'motion_reference_generation_duration', '当前镜头时长超过 MiniMax H3 原生参考视频帧上限')
-    return frames
-
-
-def valid_reference_frame_count(value) -> bool:
-    return (
-        isinstance(value, int)
-        and H3_REFERENCE_MIN_FRAMES <= value <= H3_REFERENCE_MAX_FRAMES
-        and value % H3_REFERENCE_FRAME_STRIDE == H3_REFERENCE_MIN_FRAMES
-    )
-
-
-def _atempo_filters(speed: float) -> list[str]:
-    """Build supported atempo stages for an arbitrary source-to-output rate."""
-    factors: list[float] = []
-    while speed > 2:
-        factors.append(2)
-        speed /= 2
-    while speed < 0.5:
-        factors.append(0.5)
-        speed /= 0.5
-    factors.append(speed)
-    return [f'atempo={factor:.12g}' for factor in factors]
-
-
-def _sampling_from_reference(ref: dict) -> dict:
-    selected_duration = float(ref.get('selected_duration_seconds') or (
-        float(ref['trim_end_seconds']) - float(ref['trim_start_seconds'])
-    ))
-    frames = ref.get('effective_frames')
-    if not valid_reference_frame_count(frames):
-        frames = h3_generation_frame_budget(float(ref['generation_duration_seconds']))
-    model_duration = frames / H3_REFERENCE_FPS
-    return {
-        'strategy': H3_REFERENCE_SAMPLING_STRATEGY,
-        'selected_duration_seconds': selected_duration,
-        'source_frame_count_at_24fps': _requested_reference_frames(selected_duration),
-        'allocated_frames': frames,
-        'h3_generation_frame_budget': frames,
-        'target_fps': H3_REFERENCE_FPS,
-        'model_input_duration_seconds': model_duration,
-        'source_seconds_per_output_second': selected_duration / model_duration,
-    }
-
-
 def configured_motion_reference_values(session, shot):
-    """Return the explicit native-reference selection that applies to one shot.
-
-    An empty per-shot override deliberately disables the project default.  The
-    legacy field remains a read-only compatibility source for existing shots
-    until the user saves their configuration through the project workspace.
-    """
+    """Return the explicit native-reference selection that applies to one shot."""
     detail = session.scalar(select(m.ShotDetail).where(m.ShotDetail.shot_id == shot.id))
-    production = ((detail.source_json or {}).get('production') or {}) if detail else {}
-    if isinstance(production.get('reference_video_overrides'), list):
-        return copy.deepcopy(production['reference_video_overrides'])
-    if isinstance(production.get('motion_references'), list):
-        return copy.deepcopy(production['motion_references'])
+    production = ((detail.source_json or {}).get("production") or {}) if detail else {}
+    if isinstance(production.get("reference_video_overrides"), list):
+        return copy.deepcopy(production["reference_video_overrides"])
+    if production.get("motion_references"):
+        return copy.deepcopy(production["motion_references"])
     from app.services.studio_audio_policy import get_preferences
-    return copy.deepcopy(get_preferences(session, shot.project_id)['reference_video_defaults'])
+    return copy.deepcopy(get_preferences(session, shot.project_id)["reference_video_defaults"])
 
 
 def resolve_motion_references(session, settings, shot, values=None):
-    """Freeze source identity and bounds; refuse stale or unauthorised media."""
+    """Freeze source identity and the full selected time range for one job."""
     if values is None:
         values = configured_motion_reference_values(session, shot)
-    if not isinstance(values,list) or len(values)>3:
-        raise AppError(422,'motion_reference_limit','动作参考最多选择3条视频')
-    frame_budget = h3_generation_frame_budget(float(shot.duration_seconds))
-    result=[]; seen=set()
+    if not isinstance(values, list) or len(values) > 3:
+        raise AppError(422, "motion_reference_limit", "动作参考最多选择3条视频")
+
+    result = []
+    seen = set()
     for raw in values:
         candidate = raw.model_dump(exclude_none=True) if isinstance(raw, MotionReferenceInput) else raw
-        # A frozen run includes computed evidence (frame count, checked
-        # duration, etc.).  Validate only the original user binding before
-        # recalculating that evidence against the current source file.
         if isinstance(candidate, dict):
-            candidate = {key: candidate[key] for key in MotionReferenceInput.model_fields if key in candidate}
-        try: ref=MotionReferenceInput.model_validate(candidate)
-        except Exception as exc: raise AppError(422,'motion_reference_invalid','动作参考配置无效或未明确授权') from exc
-        if ref.video_id in seen:raise AppError(422,'motion_reference_duplicate','动作参考视频不能重复选择')
+            candidate = {
+                key: candidate[key]
+                for key in MotionReferenceInput.model_fields
+                if key in candidate
+            }
+        try:
+            ref = MotionReferenceInput.model_validate(candidate)
+        except Exception as exc:
+            raise AppError(422, "motion_reference_invalid", "动作参考配置无效或未明确授权") from exc
+
+        if ref.video_id in seen:
+            raise AppError(422, "motion_reference_duplicate", "动作参考视频不能重复选择")
         seen.add(ref.video_id)
-        video=session.get(m.ReferenceVideo,ref.video_id)
-        if not video or video.state!='active':raise AppError(409,'motion_reference_missing','动作参考不存在或已移出图库')
-        if video.revision!=ref.expected_revision or video.sha256!=ref.source_sha256:
-            raise AppError(409,'motion_reference_stale','动作参考版本或哈希已变化，请重新选择并确认')
-        duration=(video.metadata_json or {}).get('duration_seconds')
-        if not isinstance(duration,(int,float)) or not math.isfinite(duration) or ref.trim_end_seconds>duration+1e-6:
-            raise AppError(422,'motion_reference_range','所选片段超出原视频时长')
-        source=safe_media_path(settings.media_root,video.relative_path,must_exist=True)
-        if not source.is_file():raise AppError(409,'motion_reference_changed','动作参考原视频缺失，未提交生成')
-        include_audio=bool(getattr(ref,'include_audio',False))
+
+        video = session.get(m.ReferenceVideo, ref.video_id)
+        if not video or video.state != "active":
+            raise AppError(409, "motion_reference_missing", "动作参考不存在或已移出图库")
+        if video.revision != ref.expected_revision or video.sha256 != ref.source_sha256:
+            raise AppError(409, "motion_reference_stale", "动作参考版本或哈希已变化，请重新选择并确认")
+
+        source_duration = (video.metadata_json or {}).get("duration_seconds")
+        if (
+            not isinstance(source_duration, (int, float))
+            or not math.isfinite(source_duration)
+            or ref.trim_end_seconds > source_duration + 1e-6
+        ):
+            raise AppError(422, "motion_reference_range", "所选片段超出原视频时长")
+
         selected_duration = ref.trim_end_seconds - ref.trim_start_seconds
-        result.append({**ref.model_dump(exclude_none=True),'relative_path':video.relative_path,'absolute_path':str(source),
-                       'selected_duration_seconds':selected_duration,
-                       'source_frame_count_at_24fps':_requested_reference_frames(selected_duration),
-                       'generation_duration_seconds':float(shot.duration_seconds),
-                       'source_duration_seconds':duration,'fps':H3_REFERENCE_FPS,
-                       'source_has_audio':bool((video.metadata_json or {}).get('has_audio')),
-                       'audio_included':include_audio})
-    for item in result:
-        item['effective_frames'] = frame_budget
-        item['effective_duration_seconds'] = frame_budget / H3_REFERENCE_FPS
-        item['sampling'] = _sampling_from_reference(item)
-    # A valid, active library item is not automatically safe to reuse in a
-    # different project.  The project-level binding is the explicit consent
-    # boundary that is frozen alongside the generation request.
+        expected_frames = reference_frame_count(selected_duration)
+        source = safe_media_path(settings.media_root, video.relative_path, must_exist=True)
+        if not source.is_file():
+            raise AppError(409, "motion_reference_changed", "动作参考原视频缺失，未提交生成")
+
+        result.append(
+            {
+                **ref.model_dump(exclude_none=True),
+                "relative_path": video.relative_path,
+                "absolute_path": str(source),
+                "selected_duration_seconds": selected_duration,
+                "source_frame_count_at_24fps": expected_frames,
+                "effective_frames": expected_frames,
+                "effective_duration_seconds": selected_duration,
+                "source_duration_seconds": source_duration,
+                "fps": H3_REFERENCE_FPS,
+                "source_has_audio": bool((video.metadata_json or {}).get("has_audio")),
+                "audio_included": bool(ref.include_audio),
+            }
+        )
+
     require_project_reference_access(session, shot.project_id, result)
     return result
 
 
 def verify_motion_sources(references):
-    """Hash in a worker thread when called from asynchronous request handlers."""
+    """Verify source hashes immediately before submission."""
     for ref in references:
-        source=Path(ref['absolute_path'])
-        if not source.is_file() or file_digest(source)!=ref['source_sha256']:
-            raise AppError(409,'motion_reference_changed','动作参考原视频缺失或哈希变化，未提交生成')
+        source = Path(ref["absolute_path"])
+        if not source.is_file() or file_digest(source) != ref["source_sha256"]:
+            raise AppError(409, "motion_reference_changed", "动作参考原视频缺失或哈希变化，未提交生成")
 
 
 def motion_live_state(session, values):
-    """Cheap fingerprint data changes whenever selected source state changes."""
-    result=[]
+    """Return state used to detect stale reference selections."""
+    result = []
     for ref in values or []:
-        identifier=ref.get('video_id') if isinstance(ref,dict) else None
-        item=session.get(m.ReferenceVideo,identifier) if identifier else None
-        result.append({'video_id':identifier,'revision':item.revision if item else None,
-                       'sha256':item.sha256 if item else None,'state':item.state if item else 'missing'})
+        identifier = ref.get("video_id") if isinstance(ref, dict) else None
+        item = session.get(m.ReferenceVideo, identifier) if identifier else None
+        result.append(
+            {
+                "video_id": identifier,
+                "revision": item.revision if item else None,
+                "sha256": item.sha256 if item else None,
+                "state": item.state if item else "missing",
+            }
+        )
     return result
 
 
 def active_motion_jobs(session, video_id):
-    active={'submitting','queued','submitted','running','postprocessing','unknown','cancelling','reconciling'}
-    return [job.id for job in session.scalars(select(m.GenerationJob).where(m.GenerationJob.status.in_(active)))
-            if any(isinstance(ref,dict) and ref.get('video_id')==video_id for ref in (job.parameters_json or {}).get('motion_references',[]))]
+    active = {"submitting", "queued", "submitted", "running", "postprocessing", "unknown", "cancelling", "reconciling"}
+    return [
+        job.id
+        for job in session.scalars(select(m.GenerationJob).where(m.GenerationJob.status.in_(active)))
+        if any(
+            isinstance(ref, dict) and ref.get("video_id") == video_id
+            for ref in (job.parameters_json or {}).get("motion_references", [])
+        )
+    ]
 
 
 def motion_bound_shots(session, video_id):
-    return [detail.shot_id for detail in session.scalars(select(m.ShotDetail))
-            if any(isinstance(ref,dict) and ref.get('video_id')==video_id for ref in
-                   ((detail.source_json or {}).get('production') or {}).get('motion_references',[]))]
+    return [
+        detail.shot_id
+        for detail in session.scalars(select(m.ShotDetail))
+        if any(
+            isinstance(ref, dict) and ref.get("video_id") == video_id
+            for ref in ((detail.source_json or {}).get("production") or {}).get("motion_references", [])
+        )
+    ]
+
+
+def _actual_frame_count(stream: dict) -> int:
+    try:
+        return int(stream.get("nb_read_frames") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def prepare_motion_reference(settings, ref):
-    """Make a checked H3 input that uniformly covers the entire selected range."""
-    source=Path(ref['absolute_path'])
-    if not source.is_file() or file_digest(source)!=ref['source_sha256']:
-        raise AppError(409,'motion_reference_changed','动作参考原视频已变化，未提交生成')
-    root=Path(settings.media_root)/'tmp';root.mkdir(parents=True,exist_ok=True)
+    """Create a checked 24fps file containing the complete selected reference range."""
+    source = Path(ref["absolute_path"])
+    if not source.is_file() or file_digest(source) != ref["source_sha256"]:
+        raise AppError(409, "motion_reference_changed", "动作参考原视频已变化，未提交生成")
+
+    trim_start = float(ref["trim_start_seconds"])
+    trim_end = float(ref["trim_end_seconds"])
+    selected_duration = trim_end - trim_start
+    reference_frame_count(selected_duration)
+    include_audio = bool(ref.get("include_audio"))
+    if include_audio and ref.get("source_has_audio") is False:
+        raise AppError(422, "motion_reference_audio_missing", "已要求使用参考视频音频，但所选视频没有可用音轨")
+
+    root = Path(settings.media_root) / "tmp"
+    root.mkdir(parents=True, exist_ok=True)
     try:
-        with tempfile.TemporaryDirectory(prefix='motion-reference-',dir=root) as directory:
-            target=Path(directory)/'reference.mp4'
-            include_audio=bool(ref.get('include_audio'))
-            if include_audio and ref.get('source_has_audio') is False:
-                raise AppError(422,'motion_reference_audio_missing','已要求使用参考视频音频，但所选视频没有可用音轨')
-            sampling=_sampling_from_reference(ref)
-            selected_duration=sampling['selected_duration_seconds']
-            output_duration=sampling['model_input_duration_seconds']
-            output_frames=sampling['allocated_frames']
-            playback_scale=output_duration / selected_duration
-            video_filters=[
-                f"trim=start={float(ref['trim_start_seconds']):.9f}:end={float(ref['trim_end_seconds']):.9f}",
-                'setpts=PTS-STARTPTS',
-                f'setpts={playback_scale:.12g}*PTS',
-                f'fps={H3_REFERENCE_FPS}',
-                # A positive source selection can contain fewer frames than
-                # H3 expects for the generated shot.  Preserve the chosen
-                # interval and clone only its final frame to meet that native
-                # input length.
-                f'tpad=stop_mode=clone:stop_duration={output_duration:.9f}',
-                f'trim=duration={output_duration:.9f}',
-                f'fps={H3_REFERENCE_FPS}',
+        with tempfile.TemporaryDirectory(prefix="motion-reference-", dir=root) as directory:
+            target = Path(directory) / "reference.mp4"
+            video_filters = [
+                f"trim=start={trim_start:.9f}:end={trim_end:.9f}",
+                "setpts=PTS-STARTPTS",
+                f"fps={H3_REFERENCE_FPS}",
             ]
-            cmd=[settings.ffmpeg_path,'-nostdin','-v','error','-i',str(source),'-map','0:v:0',
-                 '-filter:v',','.join(video_filters),'-frames:v',str(output_frames),
-                 '-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p']
+            command = [
+                settings.ffmpeg_path,
+                "-nostdin",
+                "-v",
+                "error",
+                "-i",
+                str(source),
+                "-map",
+                "0:v:0",
+                "-filter:v",
+                ",".join(video_filters),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "yuv420p",
+            ]
             if include_audio:
-                audio_filters=[
-                    f"atrim=start={float(ref['trim_start_seconds']):.9f}:end={float(ref['trim_end_seconds']):.9f}",
-                    'asetpts=PTS-STARTPTS',
-                    *_atempo_filters(selected_duration / output_duration),
+                audio_filters = [
+                    f"atrim=start={trim_start:.9f}:end={trim_end:.9f}",
+                    "asetpts=PTS-STARTPTS",
                 ]
-                cmd.extend(['-map','0:a:0?','-filter:a',','.join(audio_filters),
-                            '-c:a','aac','-b:a','128k','-ac','2','-ar','48000'])
+                command.extend(
+                    [
+                        "-map",
+                        "0:a:0?",
+                        "-filter:a",
+                        ",".join(audio_filters),
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "128k",
+                        "-ac",
+                        "2",
+                        "-ar",
+                        "48000",
+                    ]
+                )
             else:
-                cmd.append('-an')
-            cmd.extend(['-movflags','+faststart',str(target)])
-            run=subprocess.run(cmd,capture_output=True,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-            if run.returncode:raise AppError(422,'motion_reference_transcode','动作参考转码失败，未提交生成')
-            probe=subprocess.run([settings.ffprobe_path,'-v','error','-count_frames','-show_streams','-of','json',str(target)],capture_output=True,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-            if probe.returncode:raise AppError(422,'motion_reference_probe','动作参考转码后无法核验，未提交生成')
-            streams=json.loads(probe.stdout).get('streams',[])
-            video=[stream for stream in streams if stream.get('codec_type')=='video']
-            audio=[stream for stream in streams if stream.get('codec_type')=='audio']
-            if len(video)!=1 or int(video[0].get('nb_read_frames',0))!=output_frames or video[0].get('avg_frame_rate')!='24/1':
-                raise AppError(422,'motion_reference_output_invalid','动作参考帧数、帧率或音轨不符合要求，未提交生成')
-            if include_audio and len(audio)!=1:
-                raise AppError(422,'motion_reference_audio_missing','已要求使用参考视频音频，但所选片段没有可用音轨')
-            if not include_audio and audio:
-                raise AppError(422,'motion_reference_audio_unexpected','未要求参考音频，但转码结果包含音轨')
-            decode=[settings.ffmpeg_path,'-nostdin','-v','error','-i',str(target),'-map','0:v:0']
+                command.append("-an")
+            command.extend(["-movflags", "+faststart", str(target)])
+
+            encoded = subprocess.run(
+                command,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if encoded.returncode:
+                raise AppError(422, "motion_reference_transcode", "动作参考转码失败，未提交生成")
+
+            probed = subprocess.run(
+                [
+                    settings.ffprobe_path,
+                    "-v",
+                    "error",
+                    "-count_frames",
+                    "-show_streams",
+                    "-of",
+                    "json",
+                    str(target),
+                ],
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if probed.returncode:
+                raise AppError(422, "motion_reference_probe", "动作参考转码后无法核验，未提交生成")
+            streams = json.loads(probed.stdout).get("streams", [])
+            video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+            audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+            if (
+                len(video_streams) != 1
+                or video_streams[0].get("avg_frame_rate") != "24/1"
+                or _actual_frame_count(video_streams[0]) < 1
+            ):
+                raise AppError(422, "motion_reference_output_invalid", "动作参考帧率或帧序列无效，未提交生成")
+            if include_audio and len(audio_streams) != 1:
+                raise AppError(422, "motion_reference_audio_missing", "已要求使用参考视频音频，但所选片段没有可用音轨")
+            if not include_audio and audio_streams:
+                raise AppError(422, "motion_reference_audio_unexpected", "未要求参考音频，但转码结果包含音轨")
+
+            decoded = [settings.ffmpeg_path, "-nostdin", "-v", "error", "-i", str(target), "-map", "0:v:0"]
             if include_audio:
-                decode.extend(['-map','0:a:0'])
-            decode.extend(['-f','null','-'])
-            checked=subprocess.run(decode,capture_output=True,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                decoded.extend(["-map", "0:a:0"])
+            decoded.extend(["-f", "null", "-"])
+            checked = subprocess.run(
+                decoded,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
             if checked.returncode:
-                raise AppError(422,'motion_reference_decode_failed','动作参考转码后无法完整解码，未提交生成')
-            if file_digest(source)!=ref['source_sha256']:raise AppError(409,'motion_reference_changed','动作参考处理期间原视频变化，未提交生成')
-            data=target.read_bytes()
-            if not data:raise AppError(422,'motion_reference_output_size','动作参考转换文件为空')
-            return data,{'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data),'frames':output_frames,
-                         'fps':H3_REFERENCE_FPS,'audio_included':include_audio,'width':video[0].get('width'),'height':video[0].get('height'),
-                         'conversion':{'trim_start_seconds':ref['trim_start_seconds'],'trim_end_seconds':ref['trim_end_seconds'],
-                                       'selected_duration_seconds':selected_duration,
-                                       'sampling':sampling,
-                                       'fps':H3_REFERENCE_FPS,'video_codec':'libx264','audio_codec':'aac' if include_audio else None,
-                                       'scale':'none','orientation':'ffmpeg default autorotate'}}
-    except (OSError,subprocess.TimeoutExpired,ValueError,KeyError,TypeError) as exc:
-        raise AppError(422,'motion_reference_processing_failed','动作参考处理失败，未提交生成') from exc
+                raise AppError(422, "motion_reference_decode_failed", "动作参考转码后无法完整解码，未提交生成")
+            if file_digest(source) != ref["source_sha256"]:
+                raise AppError(409, "motion_reference_changed", "动作参考处理期间原视频变化，未提交生成")
+
+            data = target.read_bytes()
+            if not data:
+                raise AppError(422, "motion_reference_output_size", "动作参考转换文件为空")
+            frame_count = _actual_frame_count(video_streams[0])
+            return data, {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data),
+                "frames": frame_count,
+                "fps": H3_REFERENCE_FPS,
+                "audio_included": include_audio,
+                "width": video_streams[0].get("width"),
+                "height": video_streams[0].get("height"),
+                "conversion": {
+                    "trim_start_seconds": trim_start,
+                    "trim_end_seconds": trim_end,
+                    "selected_duration_seconds": selected_duration,
+                    "fps": H3_REFERENCE_FPS,
+                    "video_codec": "libx264",
+                    "audio_codec": "aac" if include_audio else None,
+                    "scale": "none",
+                    "orientation": "ffmpeg default autorotate",
+                },
+            }
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
+        raise AppError(422, "motion_reference_processing_failed", "动作参考处理失败，未提交生成") from exc

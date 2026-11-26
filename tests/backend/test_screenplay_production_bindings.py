@@ -159,6 +159,7 @@ def test_auto_product_binding_deduplicates_project_binding_for_repeated_slots(se
             filename='tail-light.jpeg',
             relative_path='tests/tail-light.jpeg',
             sha256='a' * 64,
+            metadata_json={'width':64,'height':64,'bytes':100},
         )
         session.add(asset)
         session.flush()
@@ -188,6 +189,14 @@ def test_auto_product_binding_deduplicates_project_binding_for_repeated_slots(se
         assert [binding.product_id for binding in project_bindings] == [product.id]
         assert {binding.shot_id for binding in shot_bindings} == {first.id, second.id}
         assert all(binding.product_id == product.id for binding in shot_bindings)
+        assert project_bindings[0].snapshot_json['images'][0]['sha256'] == asset.sha256
+        assert project_bindings[0].snapshot_json['images'][0]['id'] == image.id
+        unbound = m.Project(name='No declared reference')
+        session.add(unbound)
+        session.flush()
+        _auto_bind_product_refs(session, unbound, {}, [], 'another_import')
+        assert not session.scalar(select(m.ProjectProductBinding.id).where(
+            m.ProjectProductBinding.project_id == unbound.id))
 
 
 def test_explicit_scene_state_for_another_scene_is_rejected():

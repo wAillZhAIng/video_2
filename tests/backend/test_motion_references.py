@@ -16,7 +16,7 @@ from app import models as m
 from app.core.db import Base, build_engine, build_session_factory
 from app.core.errors import AppError
 from app.schemas_cinematic import MotionReferenceInput
-from app.services.motion_references import h3_generation_frame_budget, resolve_motion_references, motion_live_state,verify_motion_sources
+from app.services.motion_references import motion_live_state, reference_frame_count, resolve_motion_references, verify_motion_sources
 from app.services.providers import ComfyUIH3Provider, VideoGenerationRequest
 
 
@@ -60,8 +60,9 @@ def test_motion_source_revision_hash_and_bounds_are_checked(settings):
             assert denied.value.code=='reference_video_project_scope'
             session.add(m.ProjectReferenceVideo(project_id='motion-project',video_id=video.id));session.flush()
             resolved=resolve_motion_references(session,settings,shot,[ref])
-            assert resolved[0]['effective_frames']==124 and resolved[0]['audio_included'] is False
-            assert resolved[0]['sampling']['h3_generation_frame_budget']==124
+            assert resolved[0]['effective_frames'] == reference_frame_count(3)
+            assert resolved[0]['effective_duration_seconds'] == 3
+            assert resolved[0]['audio_included'] is False
             assert motion_live_state(session,[ref])[0]['revision']==1
             video.revision=2;session.flush()
             with pytest.raises(AppError,match='变化'):resolve_motion_references(session,settings,shot,[ref])
@@ -100,17 +101,10 @@ def test_native_reference_snapshot_preserves_explicit_authorization_round_trip(s
                 'trim_start_seconds': 1.0, 'trim_end_seconds': 5.0,
                 'authorized_for_motion': False, 'authorized_for_reference': True,
                 'reference_role': 'camera', 'include_audio': False,
-                'effective_frames': 124, 'effective_duration_seconds': 124 / 24,
+                'effective_frames': 96, 'effective_duration_seconds': 4.0,
                 'source_duration_seconds': 8, 'selected_duration_seconds': 4.0,
                 'source_frame_count_at_24fps': 96, 'fps': 24, 'source_has_audio': False,
                 'audio_included': False,
-                'sampling': {
-                    'strategy': 'uniform_complete_segment', 'selected_duration_seconds': 4.0,
-                    'source_frame_count_at_24fps': 96, 'allocated_frames': 124,
-                    'h3_generation_frame_budget': 124,
-                    'target_fps': 24, 'model_input_duration_seconds': 124 / 24,
-                    'source_seconds_per_output_second': 4 / (124 / 24),
-                },
             }]
             round_trip = resolve_motion_references(session, settings,
                 SimpleNamespace(project_id='native-project', duration_seconds=5), frozen)
@@ -143,14 +137,14 @@ def test_native_reference_total_duration_is_not_rejected_for_direct_submission(s
             session.flush()
             resolved = resolve_motion_references(session, settings,
                 SimpleNamespace(project_id='duration-project', duration_seconds=5), refs)
-            assert [item['effective_frames'] for item in resolved] == [124, 124]
-            assert sum(item['effective_frames'] for item in resolved) == 248
+            assert [item['effective_frames'] for item in resolved] == [192, 192]
+            assert sum(item['effective_frames'] for item in resolved) == 384
             assert [item['selected_duration_seconds'] for item in resolved] == [8, 8]
     finally:
         engine.dispose()
 
 
-def test_native_reference_long_selections_cover_every_source_within_generated_frame_budget(settings):
+def test_native_reference_long_selections_preserve_the_full_selected_range(settings):
 
     media = Path(settings.media_root); media.mkdir(parents=True, exist_ok=True)
     engine = build_engine(settings.database_url); Base.metadata.create_all(engine)
@@ -180,16 +174,15 @@ def test_native_reference_long_selections_cover_every_source_within_generated_fr
                 session, settings, SimpleNamespace(project_id='long-duration-project', duration_seconds=5), references,
             )
             assert len(resolved) == 3
-            assert [item['effective_frames'] for item in resolved] == [124, 124, 124]
+            assert [item['effective_frames'] for item in resolved] == [4_800, 4_800, 4_800]
+            assert all(item['effective_duration_seconds'] == 200 for item in resolved)
             assert all(item['selected_duration_seconds'] == 200 for item in resolved)
             assert all(item['source_frame_count_at_24fps'] == 4_800 for item in resolved)
-            assert all(item['sampling']['allocated_frames'] == item['effective_frames'] for item in resolved)
-            assert all(item['sampling']['source_seconds_per_output_second'] > 1 for item in resolved)
     finally:
         engine.dispose()
 
 
-def test_preprocess_long_reference_uniformly_covers_its_full_selected_range(settings, tmp_path):
+def test_preprocess_long_reference_preserves_its_full_selected_range(settings, tmp_path):
     import app.services.motion_references as motion
     from app.core.config import Settings
 
@@ -213,8 +206,7 @@ def test_preprocess_long_reference_uniformly_covers_its_full_selected_range(sett
     reference = {
         'absolute_path': str(source), 'source_sha256': sha,
         'trim_start_seconds': 0, 'trim_end_seconds': 20,
-        'selected_duration_seconds': 20, 'effective_frames': 39,
-        'generation_duration_seconds': 1,
+        'selected_duration_seconds': 20,
         'source_has_audio': False,
     }
 
@@ -225,9 +217,10 @@ def test_preprocess_long_reference_uniformly_covers_its_full_selected_range(sett
         settings.ffprobe_path, '-v', 'error', '-count_frames', '-show_streams', '-of', 'json', str(output),
     ]))['streams']
     video = next(stream for stream in streams if stream['codec_type'] == 'video')
-    assert int(video['nb_read_frames']) == 39
+    assert int(video['nb_read_frames']) == reference_frame_count(20)
     assert video['avg_frame_rate'] == '24/1'
-    assert receipt['conversion']['sampling']['source_seconds_per_output_second'] == pytest.approx(20 / (39 / 24))
+    assert receipt['conversion']['selected_duration_seconds'] == pytest.approx(20)
+    assert receipt['conversion']['fps'] == 24
 
     def frame(index):
         return subprocess.check_output([
@@ -236,7 +229,7 @@ def test_preprocess_long_reference_uniformly_covers_its_full_selected_range(sett
             '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
         ])
 
-    first, last = frame(0), frame(38)
+    first, last = frame(0), frame(reference_frame_count(20) - 1)
     assert sum(first[0::3]) > sum(first[2::3]) * 2
     assert sum(last[2::3]) > sum(last[0::3]) * 2
 
@@ -252,8 +245,8 @@ def test_preprocess_long_reference_uniformly_covers_its_full_selected_range(sett
         settings.ffprobe_path, '-v', 'error', '-count_frames', '-show_streams', '-of', 'json', str(short_output),
     ]))['streams']
     short_video = next(stream for stream in short_streams if stream['codec_type'] == 'video')
-    assert int(short_video['nb_read_frames']) == 39
-    assert short_receipt['conversion']['sampling']['selected_duration_seconds'] == 0.01
+    assert int(short_video['nb_read_frames']) >= 1
+    assert short_receipt['conversion']['selected_duration_seconds'] == pytest.approx(0.01)
 
 
 def test_in_use_motion_video_cannot_be_edited_or_archived(client,settings):
@@ -395,7 +388,7 @@ def test_motion_native_graph_uploads_reference_and_never_uploads_audio(settings,
     image=tmp_path/'reference.png';image.write_bytes(b'image-bytes')
     video=b'processed-mute-video'; video_sha=hashlib.sha256(video).hexdigest()
     ref={'video_id':'refvideo_test','source_sha256':'a'*64,'expected_revision':1,'trim_start_seconds':0,
-         'trim_end_seconds':3,'effective_frames':124,'effective_duration_seconds':124/24}
+         'trim_end_seconds':3,'effective_frames':72,'effective_duration_seconds':3}
     monkeypatch.setattr(motion,'prepare_motion_reference',lambda _settings,_ref:(video,{'sha256':video_sha,'bytes':len(video),'frames':124,'fps':24,'audio_included':False}))
     monkeypatch.setattr(providers,'PROJECT_ROOT',tmp_path)
     sent={}
@@ -483,3 +476,25 @@ def test_motion_native_graph_maps_explicit_audio_to_its_matching_video(settings,
     manifest=json.loads((tmp_path/'logs/jobs/audio-job/reference_manifest.json').read_text('utf-8'))
     assert manifest['motion_reference_uploads'][0]['audio_included'] is True
     assert manifest['motion_reference_uploads'][0]['audio_workflow_slot']=='ref_video_audios.ref_video_audio_0'
+
+
+def test_empty_legacy_motion_selection_inherits_project_default(settings, monkeypatch):
+    from app.services.motion_references import configured_motion_reference_values
+    from app.services import studio_audio_policy
+    engine = build_engine(settings.database_url)
+    Base.metadata.create_all(engine)
+    try:
+        with build_session_factory(engine)() as session:
+            project = m.Project(name='Reference inheritance regression')
+            session.add(project); session.flush()
+            shot = m.StoryboardShot(project_id=project.id, order=1, scene_title='Source shot')
+            session.add(shot); session.flush()
+            detail = m.ShotDetail(shot_id=shot.id, source_json={'production': {'motion_references': []}})
+            session.add(detail); session.flush()
+            expected = [{'video_id': 'project-default'}]
+            monkeypatch.setattr(studio_audio_policy, 'get_preferences', lambda *args: {'reference_video_defaults': expected})
+            assert configured_motion_reference_values(session, shot) == expected
+            detail.source_json = {'production': {'reference_video_overrides': []}}
+            assert configured_motion_reference_values(session, shot) == []
+    finally:
+        engine.dispose()

@@ -524,26 +524,16 @@ def _auto_bind_product_refs(session, project, preview, shot_ids, import_id):
     ref_map = preview.get('_product_ref_map', {})         # slot -> filename
     hint_map = preview.get('_shot_product_hints', {})     # shot_order -> [slot,...]
     if not ref_map:
-        # No declarations in docx; try fallback: bind any active product with images to all shots
-        ref_map = {'1': '__any__'}
+        return
     # Build slot -> (product_id, image_ids) mapping by filename lookup
     slot_to_product = {}
     for slot, filename in ref_map.items():
-        if filename == '__any__':
-            # Fallback: use most recently created active product that has images
-            from app.models.product_library import Product as _Prod, ProductImage as _PI
-            for prod in session.scalars(select(_Prod).where(_Prod.state == 'active').order_by(_Prod.created_at.desc())):
-                imgs = list(session.scalars(select(_PI).where(_PI.product_id == prod.id).order_by(_PI.order, _PI.id)))
-                if imgs:
-                    slot_to_product[slot] = (prod.id, [i.id for i in imgs])
-                    break
+        assets = list(session.scalars(
+            select(ScreenplayInputAsset).where(ScreenplayInputAsset.filename == filename)
+        ))
+        if len(assets) != 1:
             continue
-    for slot, filename in ref_map.items():
-        asset = session.scalar(
-            select(ScreenplayInputAsset).where(ScreenplayInputAsset.filename == filename).limit(1)
-        )
-        if not asset:
-            continue
+        asset = assets[0]
         pimage = session.scalar(
             select(ProductImage).where(ProductImage.asset_id == asset.id).limit(1)
         )
@@ -569,8 +559,11 @@ def _auto_bind_product_refs(session, project, preview, shot_ids, import_id):
     ))
     for product_id in product_ids:
         if product_id not in bound_product_ids:
+            from app.services.product_library import dto
+            snapshot = dto(session, session.get(Product, product_id))
             session.add(ProjectProductBinding(
-                project_id=project.id, product_id=product_id, snapshot_json={'import_id': import_id}
+                project_id=project.id, product_id=product_id,
+                snapshot_json={**snapshot, 'import_id': import_id}
             ))
     session.flush()
 

@@ -139,7 +139,7 @@ def frozen_generation_inputs_hash(parameters, *, fallback=None):
 
 
 def shot_preflight(session,settings,shot,require_visual=True,*,explicit_visual_ids=None,explicit_motion=None,
-                   revision_references=()):
+                   revision_references=(), include_generated_visuals=True):
     from app.services.screenplay import shot_bundle
     from app.services.revision_references import replaced_targets
     from app.core.paths import safe_media_path
@@ -200,6 +200,10 @@ def shot_preflight(session,settings,shot,require_visual=True,*,explicit_visual_i
             findings.append(issue('unsupported_control','blocker','当前H3工作流未验证精确控制：'+control,shot.id))
     visuals=[];input_hash=fingerprint(visual_inputs(session,shot))
     visual_selection=list(prod.get('visual_ids',[]))
+    if not include_generated_visuals:
+        visual_selection=[identifier for identifier in visual_selection
+            if (visual:=session.get(m.ProductionVisual,identifier)) is not None
+            and visual.snapshot_json.get('source')=='user_upload']
     if explicit_visual_ids is not None:
         # An explicit input replaces composition images. Keep independently
         # bound scene references and validate every selected ID below.

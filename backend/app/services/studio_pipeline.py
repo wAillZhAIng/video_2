@@ -86,6 +86,13 @@ def _explicit_route(route):
     return route_is_explicit(route)
 
 
+def _native_video_route(route, fallback):
+    selected = ((route or {}).get('selected') or {}).get('service_snapshot') or fallback or {}
+    return selected.get('provider') == 'comfyui' and (
+        str(selected.get('model_id', '')).startswith('minimax_h3')
+        or selected.get('settings', {}).get('workflow_profile') in {'native_h3_ref2va', 'native_h3_r2v'})
+
+
 def _route_parameters(run, slot, shot_id=None):
     route = _route(run, slot, shot_id)
     return copy.deepcopy(route.get('profile', {}).get('settings', {}).get('parameters', {})) if _explicit_route(route) else {}
@@ -257,7 +264,7 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
             source_values = raw['motion_reference_overrides'][shot.id]
         elif isinstance(production.get('reference_video_overrides'), list):
             source_values = production['reference_video_overrides']
-        elif isinstance(production.get('motion_references'), list):
+        elif production.get('motion_references'):
             # Existing explicit per-shot native-video choices remain valid
             # during the field-name migration.  ProjectReferenceVideo access
             # is still verified below, so this fallback never imports a
@@ -289,6 +296,8 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
         if config['processing'] == 'ai_super_resolution' and _explicit_route(route):
             _route_for_quality(session, route, QualitySettings.model_validate(config))
     snapshots, errors = _capture_services(session, project_id)
+    direct_native_shots = {shot.id for shot in shots
+        if _native_video_route(routes_by_shot[shot.id]['video_generation'], snapshots.get('video'))}
     nodes, known, scene_ids = [], set(), {}
     for shot in shots:
         for participant in session.scalars(select(m.ShotCharacter).where(m.ShotCharacter.shot_id == shot.id)):
@@ -297,7 +306,7 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
                 entry.update(route_shot_id=shot.id, route=copy.deepcopy(routes_by_shot[shot.id]['character_image']))
                 nodes.append(entry); known.add(participant.character_id)
         _, scene, _, prod, _ = production_context(session, shot)
-        if scene:
+        if scene and shot.id not in direct_native_shots:
             key = scene.id+':'+str(prod.get('scene_state_id') or 'default')
             scene_ids[shot.id] = key
             if not any(n['id'] == 'scene:'+key for n in nodes):
@@ -306,15 +315,22 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
     for shot in shots:
         dependencies = ['character:'+p.character_id for p in session.scalars(select(m.ShotCharacter).where(m.ShotCharacter.shot_id == shot.id))]
         if shot.id in scene_ids: dependencies.append('scene:'+scene_ids[shot.id])
-        entry = node('keyframe', shot.id, dependencies); entry.update(route=copy.deepcopy(routes_by_shot[shot.id]['keyframe_image'])); nodes.append(entry)
-        entry = node('video', shot.id, ['keyframe:'+shot.id]); entry.update(route=copy.deepcopy(routes_by_shot[shot.id]['video_generation'])); nodes.append(entry)
+        if shot.id not in direct_native_shots:
+            entry = node('keyframe', shot.id, dependencies); entry.update(route=copy.deepcopy(routes_by_shot[shot.id]['keyframe_image'])); nodes.append(entry)
+            dependencies = ['keyframe:'+shot.id]
+        entry = node('video', shot.id, dependencies); entry.update(route=copy.deepcopy(routes_by_shot[shot.id]['video_generation'])); nodes.append(entry)
         _append_media_nodes(session, shot, nodes, routes_by_shot[shot.id], shot.id in quality_postprocess,raw['dialogue_audio_policy'])
+        if shot.id in direct_native_shots:
+            for media_node in nodes:
+                if media_node['kind'] == 'tts' and media_node.get('shot_id') == shot.id:
+                    media_node['dependencies'] = list(dependencies)
     run = StudioRun(project_id=project_id, script_revision_id=script.id if script else None,
                     status='queued' if raw.get('auto_start', True) else 'paused', nodes_json=nodes,
                     snapshot_json={'options': raw, 'shot_ids': selected, 'services': snapshots, 'product_plan_result': product_plan_result,
                                    'service_errors': errors, 'routes': routes, 'routes_by_shot': routes_by_shot,
                                    'reference_videos_by_shot': reference_videos_by_shot,
                                    'reference_video_fingerprints_by_shot': reference_video_fingerprints_by_shot,
+                                   'direct_native_shot_ids': sorted(direct_native_shots),
                                     'automatic_final': automatic_final,
                                    'created_by': 'word automation' if raw.get('source') else 'studio start',
                                    'review_policy': ACCEPTANCE, 'resource_policy': {'local_gpu': 1, 'cloud': 1, 'note': 'conservative one actual task at a time; no throughput claim'}},
@@ -672,7 +688,9 @@ def _accept_inputs(session, settings, run, shot):
             _accept(session, 'production_entity', entity.id, entity.version)
     session.flush()
     options = run.snapshot_json['options']
-    pre = shot_preflight(session, settings, shot, require_visual=True,
+    direct_native = shot.id in run.snapshot_json.get('direct_native_shot_ids', [])
+    pre = shot_preflight(session, settings, shot, require_visual=not direct_native,
+                         include_generated_visuals=not direct_native,
                          explicit_visual_ids=options.get('reference_image_ids', {}).get(shot.id),
                          explicit_motion=run.snapshot_json.get('reference_videos_by_shot', {}).get(shot.id, []))
     blockers = [f for f in pre['findings'] if f['severity'] == 'blocker']

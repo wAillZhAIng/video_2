@@ -37,7 +37,7 @@ it('requires explicit permission and saves the chosen motion video and exact tri
   expect(screen.getByText(/不使用原音轨/)).toBeInTheDocument();
   expect(screen.getByLabelText('参考 1 结束秒')).toHaveValue(61);
   expect(screen.getByText(/所选范围约 1464 帧/)).toBeInTheDocument();
-  expect(screen.getByText(/均匀采样为 H3 原生帧输入/)).toBeInTheDocument();
+  expect(screen.getByText(/时长不设上限/)).toBeInTheDocument();
   await user.click(screen.getByRole('button',{name:'保存本镜制作状态'}));
   expect(screen.getByRole('alert')).toHaveTextContent('请逐条确认');
   expect(mocked).toHaveBeenCalledTimes(1);

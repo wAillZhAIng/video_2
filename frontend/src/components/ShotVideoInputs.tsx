@@ -114,7 +114,7 @@ export function ShotVideoInputs({projectId,shot,draft,onChange,onBusyChange,disa
     </fieldset>
     <fieldset>
       <legend>可选上传动作参考视频</legend>
-      <p>视频原件保存到参考视频库。逐条选择用途和任意有效时长的片段，提交时会覆盖完整所选区间均匀采样为 H3 原生帧输入。人物身份沿用本镜独立绑定的参考素材。</p>
+      <p>视频原件保存到参考视频库。逐条选择用途和任意有效时长的片段，时长不设上限。提交时会按 24 fps 保留完整所选区间的原始时序并接入 H3 原生帧输入。人物身份沿用本镜独立绑定的参考素材。</p>
       {draft.videos.map((video,index)=><div key={video.asset.id} className="workspace-grid">
         <p>{video.asset.name}</p>
         <FormField label={`参考 ${index+1} 视频用途`}>
