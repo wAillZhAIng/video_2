@@ -174,6 +174,11 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
     explicit_canvas = raw.get('explicit_native_canvas') is True or {'width', 'height'}.issubset(provided)
     validated = PipelineStart.model_validate({k: raw[k] for k in PipelineStart.model_fields if k in raw})
     raw = {**raw, **validated.model_dump()}
+    # A completed production should emit a real, playable deliverable without
+    # waiting for a second approval action.  Failed or incomplete nodes never
+    # reach the automatic-render branch, so this does not assemble partial work.
+    raw['automatic_final_assembly'] = True
+    raw['automatic_draft_assembly'] = False
     raw['explicit_native_canvas'] = explicit_canvas
     shots = _shots(session, project_id, raw.get('shot_ids'))
     if not shots: raise AppError(409, 'studio_no_shots', '先导入或创建至少一个有效分镜')
