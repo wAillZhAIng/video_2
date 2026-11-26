@@ -42,7 +42,7 @@ class ApprovalRequest(StrictModel):
     operator: str = Field(default="local-user", min_length=1, max_length=100)
 
 
-class ResolveUnknownLocalGeneration(StrictModel):
+class ResolveUnknownVideoGeneration(StrictModel):
     confirmed_inspection: Literal[True]
     accept_duplicate_risk: Literal[True]
     evidence_note: str = Field(min_length=10, max_length=2000)

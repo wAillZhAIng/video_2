@@ -57,6 +57,20 @@ logger = logging.getLogger(__name__)
 from app.core.config import PROJECT_ROOT
 
 
+async def _supervise_worker(name, worker_factory):
+    """Keep queue workers available after an unexpected coroutine exit."""
+    while True:
+        try:
+            await worker_factory()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Background worker %s stopped unexpectedly; restarting", name)
+        else:
+            logger.error("Background worker %s exited; restarting", name)
+        await asyncio.sleep(2)
+
+
 class FrontendFiles(StaticFiles):
     async def get_response(self, path, scope):
         normalized = path.replace('\\', '/').lstrip('/')
@@ -107,17 +121,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if resolved_settings.seed_demo_data:
             with session_factory() as session:
                 seed_demo(session, resolved_settings.media_root.parent.parent)
-        task = asyncio.create_task(worker(resolved_settings, session_factory)) if not resolved_settings.h3_demo_mode else None
-        image_task = asyncio.create_task(character_worker(resolved_settings, session_factory)) if not resolved_settings.h3_demo_mode else None
-        assembly_task = asyncio.create_task(assembly_worker(resolved_settings, session_factory)) if not resolved_settings.h3_demo_mode else None
-        cinematic_visual_task=asyncio.create_task(visual_worker(resolved_settings,session_factory)) if not resolved_settings.h3_demo_mode else None
-        production_task=asyncio.create_task(production_worker(app,resolved_settings,session_factory)) if not resolved_settings.h3_demo_mode else None
-        studio_task=asyncio.create_task(studio_worker(app,resolved_settings,session_factory)) if not resolved_settings.h3_demo_mode else None
-        quality_task=asyncio.create_task(quality_worker(resolved_settings,session_factory)) if not resolved_settings.h3_demo_mode else None
-        model_lab_task=asyncio.create_task(model_lab_worker(app,resolved_settings,session_factory)) if not resolved_settings.h3_demo_mode else None
-        media_task=asyncio.create_task(media_worker(resolved_settings,session_factory)) if not resolved_settings.h3_demo_mode else None
-        screenplay_task=asyncio.create_task(screenplay_worker(resolved_settings,session_factory)) if not resolved_settings.h3_demo_mode else None
-        reference_video_task=asyncio.create_task(reference_video_worker(resolved_settings,session_factory)) if not resolved_settings.h3_demo_mode else None
+        task = asyncio.create_task(_supervise_worker('jobs', lambda: worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        image_task = asyncio.create_task(_supervise_worker('character', lambda: character_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        assembly_task = asyncio.create_task(_supervise_worker('assembly', lambda: assembly_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        cinematic_visual_task = asyncio.create_task(_supervise_worker('visual', lambda: visual_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        production_task = asyncio.create_task(_supervise_worker('production', lambda: production_worker(app, resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        studio_task = asyncio.create_task(_supervise_worker('studio', lambda: studio_worker(app, resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        quality_task = asyncio.create_task(_supervise_worker('quality', lambda: quality_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        model_lab_task = asyncio.create_task(_supervise_worker('model_lab', lambda: model_lab_worker(app, resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        media_task = asyncio.create_task(_supervise_worker('media', lambda: media_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        screenplay_task = asyncio.create_task(_supervise_worker('screenplay', lambda: screenplay_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        reference_video_task = asyncio.create_task(_supervise_worker('reference_video', lambda: reference_video_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
         app.state.worker_tasks={name:task for name,task in {
             'jobs':task,'character':image_task,'assembly':assembly_task,'visual':cinematic_visual_task,
             'production':production_task,'studio':studio_task,'quality':quality_task,'model_lab':model_lab_task,

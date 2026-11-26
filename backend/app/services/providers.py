@@ -545,30 +545,51 @@ class ComfyUIH3Provider:
                 response = await client.get(f"{self.settings.comfyui_base_url}/history/{job_id}")
                 response.raise_for_status()
                 payload = response.json()
-                queue = (await client.get(f"{self.settings.comfyui_base_url}/queue")).json() if job_id not in payload else {}
         except httpx.HTTPError as exc:
             raise AppError(502, "comfyui_status_failed", "无法读取 ComfyUI 任务状态") from exc
         except ValueError as exc:
             raise AppError(502, "comfyui_invalid_history", "ComfyUI 历史不是有效 JSON") from exc
+        if not isinstance(payload, dict):
+            raise AppError(502, "comfyui_invalid_history", "ComfyUI 任务历史格式无效")
         history = payload.get(job_id)
-        if history:
+        if job_id in payload:
+            if not isinstance(history, dict):
+                raise AppError(502, "comfyui_invalid_history", "ComfyUI 任务历史格式无效")
             state = history.get("status", {})
+            if not isinstance(state, dict):
+                raise AppError(502, "comfyui_invalid_history", "ComfyUI 任务状态格式无效")
             messages = state.get("messages", [])
+            if not isinstance(messages, list):
+                raise AppError(502, "comfyui_invalid_history", "ComfyUI 任务消息格式无效")
             if state.get("status_str") == "error":
-                failures = [entry[1] for entry in messages if isinstance(entry, list) and len(entry) > 1 and entry[0] == "execution_error"]
+                failures = [entry[1] for entry in messages if isinstance(entry, (list, tuple)) and len(entry) > 1 and entry[0] == "execution_error" and isinstance(entry[1], dict)]
                 failure = failures[-1] if failures else {}
                 summary = f"Node {failure.get('node_id', '?')} ({failure.get('node_type', '?')}): {failure.get('exception_type', 'ComfyUI error')}: {failure.get('exception_message', 'Execution failed')}"
                 return {"provider_job_id": job_id, "status": "failed", "raw": history, "error": summary.strip()}
             if state.get("completed") and state.get("status_str") == "success":
                 return {"provider_job_id": job_id, "status": "generated", "raw": history}
-        if any(str(row[1]) == job_id for row in queue.get("queue_running", [])):
+        try:
+            async with local_service_client([self.settings.comfyui_base_url], timeout=10.0) as client:
+                queue = (await client.get(f"{self.settings.comfyui_base_url}/queue")).json()
+        except httpx.HTTPError as exc:
+            raise AppError(502, "comfyui_status_failed", "无法读取 ComfyUI 队列状态") from exc
+        except ValueError as exc:
+            raise AppError(502, "comfyui_invalid_history", "ComfyUI 队列不是有效 JSON") from exc
+        if not isinstance(queue, dict):
+            raise AppError(502, "comfyui_invalid_history", "ComfyUI 队列格式无效")
+        running = queue.get("queue_running", [])
+        pending = queue.get("queue_pending", [])
+        if not isinstance(running, list) or not isinstance(pending, list):
+            raise AppError(502, "comfyui_invalid_history", "ComfyUI 队列任务列表格式无效")
+        if any(isinstance(row, (list, tuple)) and len(row) > 1 and str(row[1]) == job_id for row in running):
             status = "running"
-        elif any(str(row[1]) == job_id for row in queue.get("queue_pending", [])):
+        elif any(isinstance(row, (list, tuple)) and len(row) > 1 and str(row[1]) == job_id for row in pending):
             status = "queued"
         elif not history:
             return {"provider_job_id": job_id, "status": "reconciling", "error": "正在重查 ComfyUI 队列与历史边界状态", "raw": queue}
         else:
-            status = "running"
+            return {"provider_job_id": job_id, "status": "reconciling",
+                    "error": "ComfyUI 历史中有未完成记录，但任务已不在队列中；正在核对原任务状态", "raw": history}
         return {"provider_job_id": job_id, "status": status, "raw": history or queue}
 
     async def cancel(self, job_id: str) -> bool:

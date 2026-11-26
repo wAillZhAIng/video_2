@@ -23,6 +23,9 @@ from app.services.composition import process_composition
 
 logger = logging.getLogger(__name__)
 _wan_poll_after: dict[str, float] = {}
+_COMFY_POLL_FAILURE_LIMIT = 3
+_COMFY_POLL_FAILURE_GRACE_SECONDS = 60
+_COMFY_OUTPUT_DOWNLOAD_TIMEOUT_SECONDS = 120
 
 _SOURCE_GATE_ERROR = re.compile(
     r"Compiler source gate BLOCKED (?:'[a-z_]+'|None); "
@@ -138,6 +141,61 @@ def video_outputs(history):
     return found
 
 
+def _comfy_poll_state_path(job_id):
+    safe_job_id = re.sub(r"[^A-Za-z0-9_.-]", "_", job_id)
+    return PROJECT_ROOT / "logs/jobs" / safe_job_id / "poll-failures.json"
+
+
+def clear_comfy_poll_state(job_id, *, include_missing_status=True):
+    logdir = _comfy_poll_state_path(job_id).parent
+    filenames = ("poll-failures.json", "missing_status.json") if include_missing_status else ("poll-failures.json",)
+    for filename in filenames:
+        try:
+            (logdir / filename).unlink(missing_ok=True)
+        except OSError as error:
+            logger.warning("Could not clear ComfyUI poll state for %s (%s)", job_id, type(error).__name__)
+
+
+def _record_comfy_poll_failure(job_id, error):
+    now = time.time()
+    path = _comfy_poll_state_path(job_id)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        first_failure = state.get("first_failure_at", now)
+        attempts = int(state.get("attempts", 0)) + 1
+        if not isinstance(first_failure, (int, float)) or first_failure > now:
+            first_failure = now
+        error_code = error.code if isinstance(error, AppError) else type(error).__name__
+        next_state = {
+            "first_failure_at": first_failure,
+            "last_failure_at": now,
+            "attempts": attempts,
+            "last_error_code": str(error_code)[:80],
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(next_state), encoding="utf-8")
+        temporary.replace(path)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return _COMFY_POLL_FAILURE_LIMIT, True
+    expired = now - first_failure >= _COMFY_POLL_FAILURE_GRACE_SECONDS
+    return attempts, attempts >= _COMFY_POLL_FAILURE_LIMIT or expired
+
+
+async def _download_comfy_output(base_url, output):
+    from app.core.trusted_service_origins import local_service_client
+
+    timeout_seconds = _COMFY_OUTPUT_DOWNLOAD_TIMEOUT_SECONDS
+    timeout = httpx.Timeout(timeout_seconds, connect=min(10, timeout_seconds), pool=min(10, timeout_seconds))
+    async with local_service_client([base_url], timeout=timeout) as client:
+        response = await asyncio.wait_for(
+            client.get(f"{base_url}/view", params=output),
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.content
+
+
 async def poll_job(settings, session_factory, job_id):
     with session_factory() as session:
         job = session.get(GenerationJob, job_id)
@@ -162,7 +220,8 @@ async def poll_job(settings, session_factory, job_id):
         missing_file.write_text(json.dumps({'since':since,'checked_at':time.time()}))
         if time.time()-since<30:
             return
-        result.update(status='failed',error='连续 30 秒未在 ComfyUI 队列或历史中找到任务；原任务 ID 保留，可核对服务端记录')
+        missing_file.unlink(missing_ok=True)
+        result.update(status='unknown',error='连续 30 秒未在 ComfyUI 队列或历史中找到任务；原任务 ID 保留，可重新核查或人工确认')
     elif missing_file.exists():
         missing_file.unlink()
     data = context_evidence = None
@@ -182,11 +241,7 @@ async def poll_job(settings, session_factory, job_id):
             if len(outputs) != 1:
                 raise AppError(502, "comfyui_mp4_missing", "ComfyUI 成功记录没有唯一真实 MP4", {"outputs": outputs})
             base_url=snapshot['base_url'] if snapshot else settings.comfyui_base_url
-            from app.core.trusted_service_origins import local_service_client
-            async with local_service_client([base_url], timeout=None) as client:
-                response = await client.get(f"{base_url}/view", params=outputs[0])
-                response.raise_for_status()
-                data = response.content
+            data = await _download_comfy_output(base_url, outputs[0])
         if not data or (len(data) < 128 and not (snapshot and snapshot.get('provider')=='video_api')):
             raise AppError(502, "empty_video", "ComfyUI 返回的视频为空或不完整")
     with session_factory() as session:
@@ -196,6 +251,9 @@ async def poll_job(settings, session_factory, job_id):
         previous = job.status
         job.status = result["status"]
         job.log_path = str(logdir.relative_to(PROJECT_ROOT)).replace("\\", "/")
+        if result["status"] in {"queued", "running", "generated", "failed"}:
+            job.error_code = None
+            job.error_message = None
         if data is not None:
             job.status='running'  # local decode/mixing is still unfinished
             output_dir = safe_media_path(settings.media_root, job.parameters_json["output_relative_dir"])
@@ -344,6 +402,7 @@ async def poll_job(settings, session_factory, job_id):
         elif job.status == 'unknown':
             job.error_code='provider_status_unknown'
             job.error_message=result.get('error') or '供应商任务状态未知；保留原任务 ID，不自动重复提交'
+            job.finished_at=datetime.now(timezone.utc)
         if previous != job.status:
             session.add(AuditEvent(object_type="generation_job", object_id=job.id, action=job.status, details_json={"provider_job_id": provider_id, "source": "ComfyUI queue/history" if job.provider=='comfyui_h3' else 'cloud provider task status'}))
         if job.status in {'generated','failed','cancelled','unknown'}:_wan_poll_after.pop(job.id,None)
@@ -405,8 +464,13 @@ def recheck_cloud_duration_warning(session, settings, video):
 
 
 async def worker(settings: Settings, session_factory):
+    from app.services.composition import recover_interrupted_compositions
+    compositions_recovered = False
     while True:
         try:
+            if not compositions_recovered:
+                recover_interrupted_compositions(session_factory)
+                compositions_recovered = True
             await process_video_tick(settings,session_factory)
         except asyncio.CancelledError:
             raise
@@ -427,11 +491,29 @@ async def process_video_tick(settings: Settings, session_factory):
             await poll_job(settings, session_factory, job_id)
         except asyncio.CancelledError:
             raise
-        except (AppError, httpx.HTTPError, OSError, ValueError) as error:
+        except Exception as error:
             logger.warning("Job polling failure: %s (%s)", job_id,type(error).__name__)
             with session_factory() as session:
                 job = session.get(GenerationJob, job_id)
                 if not job or job.status not in {'queued', 'running'}:continue
+                if job.provider == 'comfyui_h3' and job.provider_job_id:
+                    attempts, expired = _record_comfy_poll_failure(job_id, error)
+                    if expired:
+                        job.status='unknown'
+                        job.error_code='provider_result_unavailable'
+                        job.error_message='本地 ComfyUI 状态或结果连续不可用；原任务 ID 已保留，可重新核查原任务，未重复提交生成'
+                        job.finished_at=datetime.now(timezone.utc)
+                        session.add(AuditEvent(object_type='generation_job', object_id=job.id,
+                            action='provider_result_unavailable', details_json={
+                                'provider_job_id': job.provider_job_id, 'attempts': attempts,
+                                'last_error_code': error.code if isinstance(error, AppError) else type(error).__name__,
+                                'resubmitted': False,
+                            }))
+                    else:
+                        job.error_code='provider_poll_retrying'
+                        job.error_message=f'本地 ComfyUI 状态或结果暂时不可用，正在重试 {attempts}/{_COMFY_POLL_FAILURE_LIMIT}，尚未重复提交生成'
+                    session.commit()
+                    continue
                 # Once a provider ID exists, any status/download/local error is
                 # not a provider-declared failure. Retain the ID and block a
                 # second billable POST until the original task is reconciled.
@@ -439,10 +521,15 @@ async def process_video_tick(settings: Settings, session_factory):
                 if cannot_check:
                     job.status='unknown';job.error_code='provider_status_unknown'
                     job.error_message='无法确认或取回已提交的云端任务；请恢复服务配置并核对供应商原任务，未重复提交'
+                    job.finished_at=datetime.now(timezone.utc)
                     session.commit()
-                elif isinstance(error, AppError) and error.code not in {'comfyui_status_failed'}:
-                    job.status='failed';job.error_code=error.code;job.error_message=error.message
+                else:
+                    job.status='unknown';job.error_code='provider_status_unknown'
+                    job.error_message='任务轮询遇到未处理错误；原任务 ID 已保留，请重新核查原任务，未自动重复提交'
                     job.finished_at=datetime.now(timezone.utc);session.commit()
+        else:
+            if provider_name == 'comfyui_h3':
+                clear_comfy_poll_state(job_id, include_missing_status=False)
     from app.services.revision_postprocess import process_tick as revision_processing_tick
     await revision_processing_tick(settings, session_factory)
     await process_composition(settings, session_factory)

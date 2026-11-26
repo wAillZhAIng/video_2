@@ -30,6 +30,8 @@ GAIN_DB = -17
 GRAPH_VERSION = 1
 _NODES = ('CheckpointLoaderSimple', 'TextEncodeAceStepAudio1.5', 'EmptyAceStep1.5LatentAudio',
           'ModelSamplingAuraFlow', 'ConditioningZeroOut', 'KSampler', 'VAEDecodeAudio', 'SaveAudio')
+_DEFAULT_TASK_TIMEOUT_SECONDS = 1800
+_POLL_TIMEOUT_SECONDS = 20
 logger = logging.getLogger(__name__)
 
 
@@ -178,11 +180,23 @@ def _configured_gpu_peers(session, settings):
 
 async def _await_audio(settings, service, intent, duration):
     prompt_id = intent['prompt_id']
-    timeout = service['settings'].get('timeout')
-    deadline = time.monotonic() + timeout if timeout else None
+    try:
+        timeout = float(service['settings'].get('timeout', _DEFAULT_TASK_TIMEOUT_SECONDS))
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_TASK_TIMEOUT_SECONDS
+    if not math.isfinite(timeout) or timeout <= 0:
+        timeout = _DEFAULT_TASK_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout
     missing = 0
-    while deadline is None or time.monotonic() < deadline:
-        record = (await _json(settings, service, '/history/' + prompt_id)).get(prompt_id)
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        try:
+            record = (await asyncio.wait_for(
+                _json(settings, service, '/history/' + prompt_id),
+                timeout=min(_POLL_TIMEOUT_SECONDS, remaining),
+            )).get(prompt_id)
+        except TimeoutError:
+            break
         if record:
             outputs = record.get('outputs', {}).get('8', {}).get('audio', [])
             if outputs:
@@ -199,12 +213,19 @@ async def _await_audio(settings, service, intent, duration):
                 error = next((values.get('exception_message', '') for kind, values in messages
                               if kind == 'execution_error' and isinstance(values, dict)), '')
                 raise AppError(502, 'music_inference_failed', '本地背景音乐生成失败。' + error[:480])
-        queue = await _json(settings, service, '/queue')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            queue = await asyncio.wait_for(
+                _json(settings, service, '/queue'), timeout=min(_POLL_TIMEOUT_SECONDS, remaining))
+        except TimeoutError:
+            break
         running = [*queue.get('queue_running', []), *queue.get('queue_pending', [])]
         missing = 0 if any(isinstance(row, list) and len(row) > 1 and row[1] == prompt_id for row in running) else missing + 1
         if missing >= 12:
             break
-        await asyncio.sleep(1)
+        await asyncio.sleep(min(1, max(0, deadline - time.monotonic())))
     raise AppError(502, 'music_submission_unknown', '背景音乐任务结果待核对；重试会查询原本地任务')
 
 

@@ -212,7 +212,8 @@ def shot_preflight(session,settings,shot,require_visual=True,*,context_inputs=Fa
             findings.append(issue('cast_not_ready','blocker','参考生视频需要至少一张可用的画面参考，可绑定场景图或关键画面',shot.id))
         elif visuals:
             findings=[finding for finding in findings if finding['code']!='cast_unknown']
-    if enabled and require_visual and not any(v.kind=='keyframe' for v in visuals):findings.append(issue('keyframe_review_required','review','先生成并审核本镜关键画面，再提交电影镜头',shot.id))
+    visual_review_required = require_visual and prod.get('require_visual_review', True) is not False
+    if enabled and visual_review_required and not any(v.kind=='keyframe' for v in visuals):findings.append(issue('keyframe_review_required','review','先生成并审核本镜关键画面，再提交电影镜头',shot.id))
     policy=prod.get('requested_controls',{}).get('identity_reference_policy','full_reference')
     if policy not in {'full_reference','independent_faces_scene'}:findings.append(issue('identity_reference_policy_unsupported','blocker','未实现此身份参考路由',shot.id))
     reference_count=(sum(len(p['reference_asset_ids_json']) for p in image_participants)

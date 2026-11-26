@@ -187,14 +187,18 @@ def _evidence(session,settings,service,model,slot):
             try:current_workflow=file_sha(Path(service.settings_json.get('workflow_path') or settings.h3_workflow_api_json))
             except (OSError,TypeError):pass
         for job in session.scalars(select(m.GenerationJob).where(m.GenerationJob.status.in_(['generated','approved','revised']))):
-            snapshot=job.parameters_json.get('service_snapshot') or {}
-            if job.parameters_json.get('h3_workflow') or job.parameters_json.get('context_ir_execution') or snapshot.get('h3_workflow'):
-                proof = _context_video_evidence(session, settings, service, model, job, snapshot)
+            job_snapshot=job.parameters_json.get('service_snapshot') or {}
+            if job.parameters_json.get('h3_workflow') or job.parameters_json.get('context_ir_execution') or job_snapshot.get('h3_workflow'):
+                proof = _context_video_evidence(session, settings, service, model, job, job_snapshot)
                 if proof:return proof
                 continue
-            if legacy_evidence or not _matches(snapshot,service,model):continue
-            if service.provider=='comfyui' and (not current_workflow or snapshot.get('workflow_sha256')!=current_workflow):continue
             for video in session.scalars(select(m.VideoRevision).where(m.VideoRevision.generation_job_id==job.id)):
+                # Completed videos persist the effective service snapshot in their
+                # metadata. Older jobs may lack that snapshot in parameters_json,
+                # so use the revision metadata as the authoritative evidence.
+                snapshot=video.metadata_json.get('service_snapshot') or job_snapshot
+                if legacy_evidence or not _matches(snapshot,service,model):continue
+                if service.provider=='comfyui' and (not current_workflow or snapshot.get('workflow_sha256')!=current_workflow):continue
                 if video.metadata_json.get('playable_video') and _file(settings,video.relative_path,video.metadata_json.get('sha256')):
                     legacy_evidence={'kind':'decoded_video','job_id':job.id,'video_id':video.id,'workflow_sha256':current_workflow}
                     break

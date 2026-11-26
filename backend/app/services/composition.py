@@ -98,6 +98,22 @@ def compose(settings, snapshot, destination: Path, log_path: Path):
         'log_path': str(log_path), 'cover_relative_path': cover.relative_to(settings.media_root).as_posix()}
 
 
+def recover_interrupted_compositions(session_factory):
+    with session_factory() as session:
+        rows = list(session.scalars(select(FinalComposition).where(FinalComposition.status == 'running')))
+        recovered = 0
+        for row in rows:
+            changed = session.execute(update(FinalComposition).where(
+                FinalComposition.id == row.id, FinalComposition.status == 'running').values(
+                    status='failed', error_message='服务重启时发现未完成的合成任务；源片保留，请新建合成任务重试'))
+            if changed.rowcount:
+                recovered += 1
+                session.add(AuditEvent(object_type='final_composition', object_id=row.id,
+                    action='composition_interrupted', details_json={'recovered_at_startup': True}))
+        session.commit()
+        return recovered
+
+
 async def process_composition(settings, session_factory):
     with session_factory() as session:
         item = session.scalar(select(FinalComposition).where(FinalComposition.status=='queued').order_by(FinalComposition.created_at).limit(1))
@@ -125,8 +141,11 @@ async def process_composition(settings, session_factory):
             item.status = 'generated'; item.relative_path = relative; item.metadata_json = metadata
             session.add(AuditEvent(object_type='final_composition',object_id=identifier,action='composed',details_json=metadata))
             session.commit()
-    except (AppError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+    except Exception as error:
         with session_factory() as session:
             item = session.get(FinalComposition, identifier)
-            item.status='failed'; item.error_message=error.message if isinstance(error, AppError) else str(error)
+            if item:
+                item.status='failed'; item.error_message=error.message if isinstance(error, AppError) else str(error)
+                session.add(AuditEvent(object_type='final_composition', object_id=identifier,
+                    action='composition_failed', details_json={'error_type': type(error).__name__}))
             session.commit()
