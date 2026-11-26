@@ -34,6 +34,10 @@ _SILENCE = re.compile(
 )
 _LOWER = re.compile(r'压低音乐|压低配乐|配乐压低|音乐压低|降低(?:音乐|配乐)|duck(?: the)? (?:music|score)', re.I)
 _EFFECT = re.compile(r'气流声|环境声|底噪|摩擦声|摩擦\s*ASMR|音效|room tone|ambience|foley|sound effects?', re.I)
+_MUSIC_HINT = re.compile(
+    r'背景音乐|配乐|音乐|bgm|score|soundtrack|鼓点|节拍|旋律|电子|合成器|流行|拉丁|车库|house|pop|'
+    r'jazz|lo[- ]?fi|hip[- ]?hop|edm|synth', re.I,
+)
 
 
 def time_bounds(value):
@@ -138,6 +142,29 @@ def music_effects(value):
     return '。'.join(effects)
 
 
+def _inferred_audio_music(shots):
+    """Promote explicit per-shot sound directions to one source-backed score cue.
+
+    Text and simple Word imports often place music beside effects under
+    ``声音提示`` instead of a dedicated score section.  This preserves those
+    stated music styles without treating ordinary ambience as generated music.
+    """
+    directions, sources = [], []
+    for shot in shots:
+        raw = str(getattr(shot, 'audio_direction', '') or '').strip()
+        if not raw or _SILENCE.match(raw) or not _MUSIC_HINT.search(raw):
+            continue
+        parts = [part.strip() for part in re.split(r'[。；，,;\n]+', raw) if part.strip()]
+        music = [part for part in parts if _MUSIC_HINT.search(part)] or [raw]
+        for part in music:
+            if part not in directions:
+                directions.append(part)
+        sources.append(f'audio_direction:{shot.id}')
+    if not directions:
+        return []
+    return [{'description': '背景音乐风格：'+'；'.join(directions), 'source': sources}]
+
+
 def _window(start, end, event):
     left = max(start, start + event.start_seconds)
     right = end if event.end_seconds is None else min(end, start + event.end_seconds)
@@ -186,6 +213,8 @@ def script_music_plan(session, project_id, clips, transitions):
     # directives only to shots that belong to the active source timeline.
     if not shots:
         return []
+    if not directives:
+        directives = _inferred_audio_music(shots)
     by_id = {shot.id: shot for shot in shots}
     details = dict(session.execute(select(ShotDetail.shot_id, ShotDetail.scene_id)
                                    .where(ShotDetail.shot_id.in_(by_id))).all())

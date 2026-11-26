@@ -88,6 +88,7 @@ class ProductReferenceRetry(ShotProductReferencesEdit):
 
 class AssemblyRetry(BaseModel):
     expected_run_id: str = Field(min_length=1, max_length=64)
+    refresh: bool = False
 
 
 @router.post('/projects/{project_id}/retry-assembly', response_model=StudioOverview, status_code=202)
@@ -102,7 +103,10 @@ async def retry_assembly(project_id: str, payload: AssemblyRetry, request: Reque
             if run.id != payload.expected_run_id:
                 raise AppError(409, 'automatic_final_run_changed', '当前制作已切换，请刷新后重试')
             stage = run.result_json.get('automatic_final', {}).get('status')
-            if run.status != 'completed_with_errors' or stage not in {'blocked', 'failed', 'cancelled'}:
+            if payload.refresh:
+                if run.status not in {'completed', 'completed_with_errors'} or stage not in {'generated', 'blocked', 'failed', 'cancelled'}:
+                    raise AppError(409, 'automatic_final_refresh_unavailable', '当前成片没有可刷新重合成的完成记录')
+            elif run.status != 'completed_with_errors' or stage not in {'blocked', 'failed', 'cancelled'}:
                 raise AppError(409, 'automatic_final_retry_unavailable', '当前成片没有可重试的失败记录')
             _queue_automatic_render(session, settings, run, run.nodes_json, retry=True)
             run.error_message = None
