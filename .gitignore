@@ -46,3 +46,6 @@ fixtures/*.png
 Thumbs.db
 /VideoFactory管理/云端配置/
 /VideoFactory管理/云端视频/
+
+# Local one-off replay scripts.
+/.pytest-tmp-*.py
