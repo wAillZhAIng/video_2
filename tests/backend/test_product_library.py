@@ -629,3 +629,25 @@ def test_native_h3_project_can_save_nine_views_without_spending_keyframe_budget(
         assert [image['sha256'] for image in references]==[image['sha256'] for image in product['images']]
         assert product_library.shot_references(session,settings,shot,stage='keyframe')==[]
         assert session.scalar(select(m.GenerationJob.id)) is None
+
+
+def test_reference_selection_reads_word_import_placeholder_snapshot(client):
+    product = create_product(client)
+    project = client.post('/api/projects', json={'name': 'Imported product snapshot'}).json()
+    with client.app.state.session_factory() as session:
+        shot = m.StoryboardShot(project_id=project['id'], order=1, scene_title='Imported', status='draft')
+        session.add(shot)
+        session.flush()
+        session.add(m.ProjectProductBinding(
+            project_id=project['id'], product_id=product['id'],
+            snapshot_json={'import_id': 'legacy-word-import'},
+        ))
+        session.add(m.ShotProductBinding(
+            project_id=project['id'], shot_id=shot.id, product_id=product['id'],
+            image_ids_json=[], state_json={},
+        ))
+        session.commit()
+        shot_id = shot.id
+    response = client.get('/api/product-library/projects/' + project['id'] + '/shots/' + shot_id + '/references')
+    assert response.status_code == 200, response.text
+    assert response.json()['products'][0]['name'] == product['name']

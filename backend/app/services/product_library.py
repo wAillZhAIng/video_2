@@ -275,7 +275,7 @@ def shot_references(session,settings,shot,*,stage='video',include_image_notes=Fa
             path=safe_media_path(settings.media_root,item['relative_path'],must_exist=True)
             if sha(path.read_bytes())!=item['sha256']:raise AppError(409,'product_source_changed','冻结产品参考图发生变化')
             ref={'id':item['id'],'product_id':binding.product_id,'source':'product_library','purpose':item['purpose'],'order':item['order'],
-                 'relative_path':item['relative_path'],'absolute_path':str(path),'sha256':item['sha256'],'product_name':project.snapshot_json['name'],'visible_state':binding.state_json}
+                 'relative_path':item['relative_path'],'absolute_path':str(path),'sha256':item['sha256'],'product_name':_snapshot_product_name(session, project),'visible_state':binding.state_json}
             if include_image_notes:
                 ref['image_notes']=item.get('notes','')
             result.append(ref)
@@ -287,6 +287,13 @@ def shot_product_snapshot(session,shot):
         project=session.scalar(select(ProjectProductBinding).where(ProjectProductBinding.project_id==shot.project_id,ProjectProductBinding.product_id==binding.product_id))
         if project:result.append({'product_id':binding.product_id,'state':binding.state_json,'images':[{k:i[k] for k in ('id','sha256','relative_path','purpose','order')} for i in project.snapshot_json.get('images',[]) if i['id'] in binding.image_ids_json]})
     return result
+
+def _snapshot_product_name(session, binding):
+    name = binding.snapshot_json.get('name')
+    if name:
+        return name
+    product = session.get(Product, binding.product_id)
+    return product.name if product else binding.product_id
 
 def reference_selection(session,project_id,shot_id):
     shot=session.get(m.StoryboardShot,shot_id)
@@ -300,7 +307,7 @@ def reference_selection(session,project_id,shot_id):
         if product and product.state=='active':
             for image in images(session,binding.product_id):
                 if image.id not in available:available[image.id]=image_dto(session,image)
-        result.append({'product_id':binding.product_id,'name':project.snapshot_json['name'],'revision':binding.revision,
+        result.append({'product_id':binding.product_id,'name':_snapshot_product_name(session, project),'revision':binding.revision,
             'images':list(available.values()),'video_image_ids':binding.image_ids_json,
             'keyframe_image_ids':binding.state_json.get('keyframe_image_ids',binding.image_ids_json)})
     return {'project_id':project_id,'shot_id':shot_id,'products':result,'limits':SHOT_REFERENCE_LIMITS,
