@@ -93,6 +93,13 @@ def save_route(session,scope,target,slot,payload):
 def _matches(snapshot,service,model):
     return snapshot.get('service_id')==service.id and snapshot.get('service_revision')==service.revision and snapshot.get('model_id')==model
 
+def _matches_historical_video(snapshot,service,model):
+    current = service_snapshot(service, model)
+    return (snapshot.get('service_id') == service.id
+            and snapshot.get('provider') == service.provider
+            and snapshot.get('model_id') == model
+            and snapshot.get('is_cloud') == current.get('is_cloud'))
+
 def _file(settings,path,sha):
     try:return bool(sha) and file_sha(safe_media_path(settings.media_root,path,must_exist=True))==sha
     except (OSError,AppError):return False
@@ -197,7 +204,7 @@ def _evidence(session,settings,service,model,slot):
                 # metadata. Older jobs may lack that snapshot in parameters_json,
                 # so use the revision metadata as the authoritative evidence.
                 snapshot=video.metadata_json.get('service_snapshot') or job_snapshot
-                if legacy_evidence or not _matches(snapshot,service,model):continue
+                if legacy_evidence or not _matches_historical_video(snapshot,service,model):continue
                 if service.provider=='comfyui' and (not current_workflow or snapshot.get('workflow_sha256')!=current_workflow):continue
                 if video.metadata_json.get('playable_video') and _file(settings,video.relative_path,video.metadata_json.get('sha256')):
                     legacy_evidence={'kind':'decoded_video','job_id':job.id,'video_id':video.id,'workflow_sha256':current_workflow}
