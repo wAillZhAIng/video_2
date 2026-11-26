@@ -14,8 +14,8 @@ type VideoImport = { items?: ReferenceVideoAsset[]; duplicate_ids?: string[]; er
 
 export function motionInputError(video: VideoReference) {
   const start=Number(video.start), end=Number(video.end);
-  if(!video.start.trim()||!video.end.trim()||!Number.isFinite(start)||!Number.isFinite(end)||start<0||end-start<2||end-start>15){
-    return '每条参考视频必须填写 2–15 秒的有效截取范围。';
+  if(!video.start.trim()||!video.end.trim()||!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<=start){
+    return '每条参考视频必须填写有效截取范围。';
   }
   if(end>Number(video.asset.metadata.duration_seconds))return '截取结束时间超过原视频时长。';
   return '';
@@ -87,11 +87,11 @@ export function ShotVideoInputs({projectId,shot,draft,onChange,onBusyChange,disa
       asset=library.items.find(item=>item.id===result.duplicate_ids?.[0]);
     }
     const duration=asset?.metadata.duration_seconds;
-    if(!asset||asset.state!=='active'||typeof duration!=='number'||!Number.isFinite(duration)||duration<2){
-      throw new Error('没有可绑定的参考视频，动作片段至少需要 2 秒。');
+    if(!asset||asset.state!=='active'||typeof duration!=='number'||!Number.isFinite(duration)||duration<=0){
+      throw new Error('没有可绑定的参考视频，动作片段必须具有正时长。');
     }
     if(draft.videos.some(video=>video.asset.id===asset.id))throw new Error('当前镜头已选择此视频。');
-    const end=Math.min(duration,15,Math.max(2,shot.duration_seconds));
+    const end=duration;
     onChange({...draft,videos:[...draft.videos,{asset,start:'0',end:String(end),role:'structure'}]});
     setVideoFile(null);setVideoConfirmed(false);setVideoVersion(value=>value+1);
   }
@@ -114,7 +114,7 @@ export function ShotVideoInputs({projectId,shot,draft,onChange,onBusyChange,disa
     </fieldset>
     <fieldset>
       <legend>可选上传动作参考视频</legend>
-      <p>视频原件保存到参考视频库。逐条选择用途和 2–15 秒片段，仅提交所选片段的画面。人物身份沿用本镜独立绑定的参考素材。</p>
+      <p>视频原件保存到参考视频库。逐条选择用途和任意有效时长的片段，提交时会覆盖完整所选区间均匀采样为 H3 原生帧输入。人物身份沿用本镜独立绑定的参考素材。</p>
       {draft.videos.map((video,index)=><div key={video.asset.id} className="workspace-grid">
         <p>{video.asset.name}</p>
         <FormField label={`参考 ${index+1} 视频用途`}>

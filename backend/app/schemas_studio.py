@@ -51,9 +51,6 @@ class ProjectReferenceVideoConfig(StudioInput):
         groups = [self.reference_video_defaults, *self.shot_reference_video_overrides.values()]
         if any(len({item.video_id for item in group}) != len(group) for group in groups):
             raise ValueError('同一项目或镜头不能重复选择参考视频')
-        if any(sum(item.trim_end_seconds - item.trim_start_seconds for item in group) > 15 + 1e-6
-               for group in groups):
-            raise ValueError('同一镜头的参考视频总时长不能超过15秒')
         return self
 
 

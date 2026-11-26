@@ -55,11 +55,15 @@ def project_config(session, project_id: str) -> dict[str, Any]:
     return {**defaults, 'shot_reference_video_overrides': overrides, 'limits': limits()}
 
 
-def limits() -> dict[str, int]:
+def limits() -> dict[str, Any]:
     return {
         'max_reference_videos': 3,
-        'max_reference_duration_seconds': 15,
-        'min_reference_duration_seconds': 2,
+        'reference_duration_unlimited': True,
+        'reference_sampling': {
+            'strategy': 'uniform_complete_segment',
+            'target_fps': 24,
+            'per_input_frame_budget': 'matches_generation_length',
+        },
         'max_reference_images': 9,
         'max_mixed_reference_files': 12,
     }

@@ -50,7 +50,7 @@ function usableDuration(video: ReferenceVideoAsset) {
 }
 
 function newBinding(video: ReferenceVideoAsset): ReferenceVideoBinding {
-  const end = Math.min(usableDuration(video), 15);
+  const end = usableDuration(video);
   return {
     video_id: video.id,
     expected_revision: video.revision,
@@ -66,8 +66,8 @@ function newBinding(video: ReferenceVideoAsset): ReferenceVideoBinding {
 function bindingIssue(binding: ReferenceVideoBinding, video?: ReferenceVideoAsset) {
   const start = Number(binding.trim_start_seconds);
   const end = Number(binding.trim_end_seconds);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end - start < 2 || end - start > 15) {
-    return '每段参考视频须为 2–15 秒，请填写有效起止时间。';
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) {
+    return '每段参考视频必须填写有效起止时间。';
   }
   if (video && end > usableDuration(video) + 0.0001) return '截取结束时间不能超过原视频时长。';
   if (video && (video.revision !== binding.expected_revision || video.sha256 !== binding.source_sha256)) {
@@ -80,15 +80,12 @@ function bindingIssue(binding: ReferenceVideoBinding, video?: ReferenceVideoAsse
 function bindingsIssue(bindings: ReferenceVideoBinding[], videos: ReferenceVideoAsset[]) {
   if (bindings.length > 3) return 'MiniMax H3 一次最多接收 3 段参考视频。';
   const ids = new Set<string>();
-  let seconds = 0;
   for (const binding of bindings) {
     if (ids.has(binding.video_id)) return '同一层级不能重复选择同一个参考视频。';
     ids.add(binding.video_id);
     const issue = bindingIssue(binding, videos.find(video => video.id === binding.video_id));
     if (issue) return issue;
-    seconds += Number(binding.trim_end_seconds) - Number(binding.trim_start_seconds);
   }
-  if (seconds > 15.0001) return '同一镜头的参考视频总时长不能超过 15 秒。请调整片段或移除部分视频。';
   return '';
 }
 
@@ -286,7 +283,7 @@ export function ProjectReferenceVideos({ projectId, shots, disabled, onStateChan
   const locked = disabled || busy || loading;
   return <section className="project-reference-videos" aria-label="可选参考视频">
     <div className="studio-section-heading"><div><h3>参考视频（可选）</h3><p>视频直接预处理为 24 fps 帧序列并接入 MiniMax H3 的原生 <code>ref_video_N</code> 输入。它不替代产品／人物图片；默认不使用原视频音轨。</p></div><button type="button" className="button button-secondary button-small" disabled={locked} onClick={() => setReload(value => value + 1)}>重新读取</button></div>
-    <p className="form-hint">最多 3 段、每段 2–15 秒、同一镜头总计不超过 15 秒。图片与视频独立编号；用户指令和产品／人物参考优先于视频中的主体。</p>
+    <p className="form-hint">最多 3 段，每段可选择原视频中的任意有效范围。长片段会覆盖整个所选区间均匀采样为 H3 原生帧输入。图片与视频独立编号，用户指令和产品／人物参考优先于视频中的主体。</p>
     {loading ? <p role="status">读取本项目可用的参考视频…</p> : null}
     {error ? <p role="alert" className="inline-notice warning">{error}</p> : null}
     {notice ? <p role="status" className="inline-notice">{notice}</p> : null}

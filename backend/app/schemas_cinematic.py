@@ -107,8 +107,8 @@ class MotionReferenceInput(BaseModel):
     @model_validator(mode='after')
     def valid_segment(self):
         if not (self.authorized_for_motion or self.authorized_for_reference):raise ValueError('请明确确认本镜可以使用该参考视频')
-        if not 2 <= self.trim_end_seconds-self.trim_start_seconds <= 15:
-            raise ValueError('参考视频片段需为2至15秒')
+        if self.trim_end_seconds <= self.trim_start_seconds:
+            raise ValueError('参考视频片段结束时间必须晚于开始时间')
         if self.target_character_id and self.reference_role not in {'action','combined'}:
             raise ValueError('只有动作或综合参考可以明确绑定人物')
         return self

@@ -36,7 +36,6 @@ from app.services.gpu_gate import gpu_submission
 
 ANALYSIS_VERSION = 'reference-video-local-1'
 MAX_BYTES = 256 * 1024**2
-MAX_DURATION = 1800
 FORMATS = {'.mp4', '.mov', '.mkv', '.webm'}
 LOCAL_SNAPSHOT = {'provider': 'local_llm', 'base_url': 'http://127.0.0.1:8771/v1',
                   'model_id': 'Qwen/Qwen3-VL-2B-Instruct', 'is_cloud': False}
@@ -58,12 +57,12 @@ def file_digest(path):
     return value.hexdigest()
 
 
-def run(arguments, timeout=180):
+def run(arguments, timeout=None):
     try:
         result = subprocess.run([str(a) for a in arguments], capture_output=True, shell=False,
                                 timeout=timeout, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AppError(422, 'reference_video_tool', '本地媒体工具不可用或处理超时：' + type(exc).__name__) from exc
+        raise AppError(422, 'reference_video_tool', '本地媒体工具不可用或处理失败：' + type(exc).__name__) from exc
     if result.returncode:
         raise AppError(422, 'reference_video_decode', '视频读取或解码失败：' + result.stderr.decode('utf-8', 'replace')[-1200:])
     return result
@@ -71,20 +70,20 @@ def run(arguments, timeout=180):
 
 def probe_video(settings, path, *, full_decode=True):
     try:
-        raw = json.loads(run([settings.ffprobe_path, '-v', 'error', '-show_streams', '-show_format', '-of', 'json', path], 30).stdout)
+        raw = json.loads(run([settings.ffprobe_path, '-v', 'error', '-show_streams', '-show_format', '-of', 'json', path]).stdout)
         streams = raw.get('streams', [])
         video = next(s for s in streams if s.get('codec_type') == 'video' and not s.get('disposition', {}).get('attached_pic'))
         duration = float(raw.get('format', {}).get('duration') or video.get('duration') or 0)
         width, height = int(video['width']), int(video['height'])
-        if not math.isfinite(duration) or not 0 < duration <= MAX_DURATION or not 0 < width * height <= 20_000_000:
-            raise ValueError('Duration or dimensions exceed bounded local analysis limits')
+        if not math.isfinite(duration) or not 0 < duration or not 0 < width * height <= 20_000_000:
+            raise ValueError('Invalid duration or dimensions')
         rate = video.get('avg_frame_rate', '0/1').split('/')
         fps = float(rate[0]) / max(float(rate[1]) if len(rate) > 1 else 1, 1)
         audio = next((s for s in streams if s.get('codec_type') == 'audio'), {})
     except (ValueError, KeyError, StopIteration, TypeError) as exc:
-        raise AppError(422, 'reference_video_metadata', '视频需要有效画面、时长不超过30分钟、像素不超过2000万') from exc
+        raise AppError(422, 'reference_video_metadata', '视频需要有效画面和时长，像素不超过2000万') from exc
     if full_decode:
-        run([settings.ffmpeg_path, '-nostdin', '-v', 'error', '-xerror', '-i', path, '-f', 'null', '-'], 600)
+        run([settings.ffmpeg_path, '-nostdin', '-v', 'error', '-xerror', '-i', path, '-f', 'null', '-'])
     return {'duration_seconds': duration, 'width': width, 'height': height, 'fps': round(fps, 4),
             'format': raw.get('format', {}).get('format_name'), 'codec': video.get('codec_name'),
             'has_audio': bool(audio), 'audio_sample_rate': int(audio.get('sample_rate') or 0),
@@ -234,11 +233,9 @@ def retry_analysis(session, settings, identifier, payload):
 
 def detect_scenes(settings, path, duration, threshold):
     result = run([settings.ffmpeg_path, '-nostdin', '-hide_banner', '-loglevel', 'info', '-i', path,
-        '-an', '-vf', f"scale=320:-2,select='gt(scene,{threshold})',showinfo", '-f', 'null', '-'], 600)
+        '-an', '-vf', f"scale=320:-2,select='gt(scene,{threshold})',showinfo", '-f', 'null', '-'])
     times = sorted({round(float(value), 4) for value in re.findall(r'pts_time:([0-9.]+)', result.stderr.decode('utf-8', 'replace'))
                     if .08 < float(value) < duration - .08})
-    if len(times) > 1000:
-        raise AppError(422, 'video_scene_limit', '视频切换超过1000处，请分段导入')
     boundaries = [0.0, *times, duration]
     shots = [{'index': index + 1, 'start_seconds': round(start, 4), 'end_seconds': round(end, 4),
               'duration_seconds': round(end - start, 4), 'boundary_method': 'ffmpeg_scene_threshold',

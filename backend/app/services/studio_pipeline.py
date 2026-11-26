@@ -267,8 +267,6 @@ def create_pipeline(session, settings, project_id, options, *, prior_quality=Non
             source_values = raw.get('reference_video_defaults', [])
         resolved = resolve_motion_references(session, settings, shot, source_values)
         require_project_reference_access(session, project_id, resolved)
-        if sum(float(item['effective_duration_seconds']) for item in resolved) > 15 + 1e-6:
-            raise AppError(422, 'reference_video_total_duration', '本镜原生参考视频总时长最多15秒，请缩短或移除部分片段')
         frozen = public_references(resolved)
         reference_videos_by_shot[shot.id] = frozen
         reference_video_fingerprints_by_shot[shot.id] = references_fingerprint(frozen)

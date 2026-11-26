@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import mimetypes
 import uuid
 from io import BytesIO
@@ -940,7 +941,7 @@ def _restore_frozen_motion_references(session: Session, settings: Settings, refe
     if len(references) > 3:
         raise AppError(409, 'retry_snapshot_incomplete', '原任务的参考视频数量超过当前 MiniMax H3 上限')
     restored = []
-    total_duration = 0.0
+    from app.services.motion_references import valid_reference_frame_count
     for reference in references:
         if not isinstance(reference, dict):
             raise AppError(409, 'retry_snapshot_incomplete', '原任务的参考视频快照不完整，无法安全重试')
@@ -955,13 +956,11 @@ def _restore_frozen_motion_references(session: Session, settings: Settings, refe
             raise AppError(409, 'retry_reference_changed', '原任务的参考视频已变化或不可用，未提交重试')
         frame_count = reference.get('effective_frames')
         duration = reference.get('effective_duration_seconds')
-        if not isinstance(frame_count, int) or not 48 <= frame_count <= 360 or not isinstance(duration, (int, float)):
+        if (not valid_reference_frame_count(frame_count) or not isinstance(duration, (int, float))
+                or not math.isfinite(float(duration)) or float(duration) <= 0):
             raise AppError(409, 'retry_snapshot_incomplete', '原任务的参考视频处理参数不完整，无法安全重试')
-        total_duration += float(duration)
         source = safe_media_path(settings.media_root, video.relative_path, must_exist=True)
         restored.append({**copy.deepcopy(reference), 'relative_path': video.relative_path, 'absolute_path': str(source)})
-    if total_duration > 15 + 1e-6:
-        raise AppError(409, 'retry_snapshot_incomplete', '原任务的参考视频总时长超过当前 MiniMax H3 上限')
     return restored
 
 

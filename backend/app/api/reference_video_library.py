@@ -27,7 +27,7 @@ def list_videos(request: Request, q: str = Query('', max_length=200), category: 
         query = query.where(ReferenceVideo.category == category)
     items = session.scalars(query.order_by(ReferenceVideo.created_at.desc()).limit(500))
     return {'items': [service.video_dto(session, item) for item in items],
-            'limits': {'max_bytes': service.MAX_BYTES, 'max_duration_seconds': service.MAX_DURATION,
+            'limits': {'max_bytes': service.MAX_BYTES, 'duration_seconds_unlimited': True,
                        'max_batch': 10, 'max_frames': 24, 'formats': sorted(service.FORMATS)},
             'analysis_version': service.ANALYSIS_VERSION,
             'storage_policy': 'controlled originals retained; no persistent extracted frames or audio'}
@@ -145,7 +145,7 @@ def analyze(identifier: str, payload: AnalyzeReferenceVideo, request: Request, s
 
 
 @router.get('/{identifier}/frames')
-def preview_frame(identifier: str, request: Request, timestamp_seconds: float = Query(ge=0, le=service.MAX_DURATION),
+def preview_frame(identifier: str, request: Request, timestamp_seconds: float = Query(ge=0),
                    session: Session = Depends(get_db)):
     item = service.get_video(session, identifier)
     if timestamp_seconds >= item.metadata_json['duration_seconds']:

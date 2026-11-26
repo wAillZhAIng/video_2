@@ -16,7 +16,7 @@ const video = {
 const secondVideo = {
   ...video, id: 'ref-video-2', name: '车灯夜骑跟拍', filename: 'light.mp4', relative_path: 'reference/light.mp4',
   media_url: '/api/media/reference/light.mp4', sha256: 'b'.repeat(64), revision: 7,
-  metadata: { duration_seconds: 12, width: 1920, height: 1080, fps: 24, has_audio: false },
+  metadata: { duration_seconds: 120, width: 1920, height: 1080, fps: 24, has_audio: false },
 };
 
 afterEach(() => { cleanup(); mocked.mockReset(); vi.restoreAllMocks(); });
@@ -101,7 +101,8 @@ it('replaces a selected source with a fresh native-video snapshot instead of reu
   await user.selectOptions(screen.getByLabelText('替换 Video 1'), secondVideo.id);
   expect(screen.getByText(/Video 1 · 车灯夜骑跟拍/)).toBeVisible();
   expect(screen.getByLabelText(/ref_video_audio_1/)).not.toBeChecked();
-  expect(screen.getByLabelText('Video 1 结束秒')).toHaveValue(12);
+  expect(screen.getByLabelText('Video 1 结束秒')).toHaveValue(120);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
 
 it('keeps a browsed global video out of project selections until the user explicitly attaches it', async () => {

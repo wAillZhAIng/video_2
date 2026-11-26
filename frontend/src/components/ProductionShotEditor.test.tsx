@@ -25,7 +25,7 @@ it('persists an explicitly selected independent-face policy only when saving thi
 
 it('requires explicit permission and saves the chosen motion video and exact trim in the shot payload',async()=>{
   const user=userEvent.setup();
-  mocked.mockResolvedValueOnce({items:[{id:'v1',name:'动作样片',state:'active',revision:3,sha256:'a'.repeat(64),metadata:{duration_seconds:6,fps:24}}]});
+  mocked.mockResolvedValueOnce({items:[{id:'v1',name:'动作样片',state:'active',revision:3,sha256:'a'.repeat(64),metadata:{duration_seconds:61,fps:24}}]});
   mocked.mockResolvedValueOnce({});
   const item={shot:{id:'s1',order:1,scene_title:'动作镜头',project_id:'p1',duration_seconds:5},scene_id:'scene1',preflight:{ready:true,counts:{blocker:0,review:0},findings:[],generation_inputs_hash:'hash'},production:{wardrobe_states:{},prop_states:[],beats:[],requested_controls:{}},cast:[]};
   render(<ProductionShotEditor item={item} designs={[]} reload={async()=>{}} onDirty={vi.fn()}/>);
@@ -35,16 +35,17 @@ it('requires explicit permission and saves the chosen motion video and exact tri
   await user.selectOptions(await screen.findByLabelText('选择动作参考视频'),'v1');
   await user.click(screen.getByRole('button',{name:'添加本镜参考'}));
   expect(screen.getByText(/不使用原音轨/)).toBeInTheDocument();
-  expect(screen.getByText(/预估实际参考 107 帧/)).toBeInTheDocument();
-  expect(screen.getByText(/短于所选范围/)).toBeInTheDocument();
+  expect(screen.getByLabelText('参考 1 结束秒')).toHaveValue(61);
+  expect(screen.getByText(/所选范围约 1464 帧/)).toBeInTheDocument();
+  expect(screen.getByText(/均匀采样为 H3 原生帧输入/)).toBeInTheDocument();
   await user.click(screen.getByRole('button',{name:'保存本镜制作状态'}));
   expect(screen.getByRole('alert')).toHaveTextContent('请逐条确认');
   expect(mocked).toHaveBeenCalledTimes(1);
   await user.click(screen.getByLabelText('我确认有权将此视频用于本镜的动作参考'));
   await user.clear(screen.getByLabelText('参考 1 结束秒'));
-  await user.type(screen.getByLabelText('参考 1 结束秒'),'1');
+  await user.type(screen.getByLabelText('参考 1 结束秒'),'0');
   await user.click(screen.getByRole('button',{name:'保存本镜制作状态'}));
-  expect(screen.getByRole('alert')).toHaveTextContent('2–15 秒');
+  expect(screen.getByRole('alert')).toHaveTextContent('有效的开始和结束时间');
   expect(mocked).toHaveBeenCalledTimes(1);
   await user.clear(screen.getByLabelText('参考 1 结束秒'));
   await user.type(screen.getByLabelText('参考 1 结束秒'),'5');
