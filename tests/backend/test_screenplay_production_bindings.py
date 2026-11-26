@@ -10,7 +10,7 @@ from app.core.db import Base, build_engine, build_session_factory
 from app.schemas_screenplay import ImportConfirm
 from app.services.cinematic_quality import inspect_ir, shot_preflight
 from app.services.screenplay_production_bindings import bind_production_designs
-from app.services.word_screenplay import commit_import
+from app.services.word_screenplay import _auto_bind_product_refs, commit_import
 
 
 def sample():
@@ -142,6 +142,52 @@ def test_auto_binding_does_not_use_or_modify_designs_scoped_to_other_scene():
     source['shots'][0]['production']['wardrobe_states']['A'] = {}
     with pytest.raises(ValueError, match='缺少明确名称或描述'):
         bind_production_designs(source, 'one')
+
+
+def test_auto_product_binding_deduplicates_project_binding_for_repeated_slots(settings):
+    engine = build_engine(settings.database_url)
+    Base.metadata.create_all(engine)
+    factory = build_session_factory(engine)
+    with factory() as session:
+        project = m.Project(name='Repeated product slots')
+        product = m.Product(name='Tail light')
+        session.add_all([project, product])
+        session.flush()
+
+        asset = m.ScreenplayInputAsset(
+            input_mode='image',
+            filename='tail-light.jpeg',
+            relative_path='tests/tail-light.jpeg',
+            sha256='a' * 64,
+        )
+        session.add(asset)
+        session.flush()
+        image = m.ProductImage(product_id=product.id, asset_id=asset.id, purpose='reference', order=1)
+        first = m.StoryboardShot(project_id=project.id, order=1, scene_title='First')
+        second = m.StoryboardShot(project_id=project.id, order=2, scene_title='Second')
+        session.add_all([image, first, second])
+        session.flush()
+
+        _auto_bind_product_refs(
+            session,
+            project,
+            {
+                '_product_ref_map': {'1': 'tail-light.jpeg', '2': 'tail-light.jpeg'},
+                '_shot_product_hints': {'1': ['1'], '2': ['2']},
+            },
+            [first.id, second.id],
+            'import_test',
+        )
+
+        project_bindings = list(session.scalars(select(m.ProjectProductBinding).where(
+            m.ProjectProductBinding.project_id == project.id,
+        )))
+        shot_bindings = list(session.scalars(select(m.ShotProductBinding).where(
+            m.ShotProductBinding.project_id == project.id,
+        )))
+        assert [binding.product_id for binding in project_bindings] == [product.id]
+        assert {binding.shot_id for binding in shot_bindings} == {first.id, second.id}
+        assert all(binding.product_id == product.id for binding in shot_bindings)
 
 
 def test_explicit_scene_state_for_another_scene_is_rejected():

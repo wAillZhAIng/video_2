@@ -558,15 +558,17 @@ def _auto_bind_product_refs(session, project, preview, shot_ids, import_id):
     if not slot_to_product:
         return
 
-    # Ensure each product has a ProjectProductBinding
-    for product_id, _ in slot_to_product.values():
-        exists = session.scalar(
-            select(ProjectProductBinding).where(
-                ProjectProductBinding.project_id == project.id,
-                ProjectProductBinding.product_id == product_id
-            )
+    # Several declared slots may resolve to different photos of the same product.
+    # Queue one project-level binding per product before flushing the session.
+    product_ids = list(dict.fromkeys(product_id for product_id, _ in slot_to_product.values()))
+    bound_product_ids = set(session.scalars(
+        select(ProjectProductBinding.product_id).where(
+            ProjectProductBinding.project_id == project.id,
+            ProjectProductBinding.product_id.in_(product_ids),
         )
-        if not exists:
+    ))
+    for product_id in product_ids:
+        if product_id not in bound_product_ids:
             session.add(ProjectProductBinding(
                 project_id=project.id, product_id=product_id, snapshot_json={'import_id': import_id}
             ))
