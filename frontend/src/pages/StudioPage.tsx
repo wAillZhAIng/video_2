@@ -131,7 +131,12 @@ export function StudioPage() {
       }
     });
   }
-  const finalRender = data?.renders?.find(render => render.id === data.run?.result_json?.render_id);
+  const runRenderId = data?.run?.result_json?.render_id;
+  const completedExports = data?.renders?.filter(render => render.kind === 'render'
+    && render.status === 'generated' && render.relative_path) || [];
+  const finalRender = data?.renders?.find(render => render.id === runRenderId)
+    || (!runRenderId ? [...completedExports].sort((a, b) =>
+      String(b.created_at || '').localeCompare(String(a.created_at || '')))[0] : undefined);
   const finalPlayback = finalRender?.status === 'generated' && finalRender.relative_path ? api.mediaUrl(finalRender.relative_path) : '';
   const finalInfo = finalRender?.metadata_json?.actual;
   const previousExports = data?.renders?.filter(render => render.id !== finalRender?.id && render.kind === 'render'
