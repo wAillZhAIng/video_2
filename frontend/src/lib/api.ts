@@ -832,6 +832,8 @@ export const api = {
     if (value) return apiUrl(`/api/media/${value.split("/").map(encodeURIComponent).join("/")}`);
     return mediaId ? apiUrl(`/api/media/${encodeURIComponent(mediaId)}`) : "";
   },
+  mediaDownloadUrl: (relativePath: string) =>
+    apiUrl(`/api/media/${relativePath.split("/").map(encodeURIComponent).join("/")}?download=1`),
 };
 
 function toShotPayload(shot: Partial<StoryboardShot>) {

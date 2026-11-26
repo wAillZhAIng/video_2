@@ -143,18 +143,13 @@ def test_cloud_dispatch_in_mixed_run_keeps_legacy_adapter_arguments(session, set
     assert arguments['frozen_service'] is None and arguments['frozen_context'] is None
 
 
-def test_container_requires_explicit_context_but_windows_legacy_loopback_mapping_survives(settings, monkeypatch):
+def test_context_ir_is_opt_in_by_service_profile(settings):
     snapshot = {'provider': 'comfyui', 'base_url': 'http://127.0.0.1:8189',
                 'model_id': 'minimax_h3_ref2va_pruned_w6a8.safetensors', 'settings': {}}
-    monkeypatch.setattr(studio.sys, 'platform', 'win32')
-    settings.container_mode = True
     assert studio.wants_context_profile(settings, snapshot) is False
-    settings.container_mode = False
-    assert studio.wants_context_profile(settings, snapshot) is True
     snapshot['settings'] = {'workflow_profile': 'native_h3_r2v', 'h3_context_ir': False}
     assert studio.wants_context_profile(settings, snapshot) is False
     snapshot['settings'] = {'workflow_profile': 'context_ir', 'h3_context_ir': True}
-    settings.container_mode = True
     assert studio.wants_context_profile(settings, snapshot) is True
     snapshot['provider'] = 'video_api'
     assert studio.wants_context_profile(settings, snapshot) is False
@@ -254,3 +249,40 @@ def test_saved_quality_locks_only_context_modes_in_mixed_run(session, settings):
     result = apply_saved_quality(session, settings, project.id, expected_profile_revision=1)
     assert result['applied'] == []
     assert run.snapshot_json['h3_context_by_shot'][shots[0].id]['service']['h3_workflow']['actual_steps'] == 30
+
+
+@pytest.mark.parametrize('mode', ['high', 'fast', 'preview'])
+def test_native_h3_quality_uses_fixed_four_steps_without_context_ir(mode):
+    shot = SimpleNamespace(id='native-' + mode)
+    quality = QualitySettings(mode=mode, resolution='4k', aspect_ratio='9:16',
+                              processing='ai_super_resolution').model_dump()
+    run = SimpleNamespace(snapshot_json={
+        'options': {'quality_by_shot': {shot.id: quality}},
+        'services': {'video': {'provider': 'comfyui',
+            'settings': {'workflow_profile': 'native_h3_r2v', 'h3_context_ir': False}}},
+    })
+    assert studio.generation_quality_parameters(run, shot)['steps'] == 4
+
+
+def test_context_ir_keeps_frozen_steps_when_saved_mode_is_fast():
+    shot = SimpleNamespace(id='context-fast')
+    quality = QualitySettings(mode='fast').model_dump()
+    run = SimpleNamespace(snapshot_json={
+        'options': {'quality_by_shot': {shot.id: quality}},
+        'h3_context_by_shot': {shot.id: {'service': {'h3_workflow': {'actual_steps': 20}}}},
+    })
+    assert studio.generation_quality_parameters(run, shot)['steps'] == 20
+
+
+
+
+def test_unconfigured_comfyui_fast_quality_remains_blocked():
+    shot = SimpleNamespace(id='unconfigured-fast')
+    quality = QualitySettings(mode='fast').model_dump()
+    run = SimpleNamespace(snapshot_json={
+        'options': {'quality_by_shot': {shot.id: quality}},
+        'services': {'video': {'provider': 'comfyui', 'settings': {}}},
+    })
+    with pytest.raises(AppError) as blocked:
+        studio.generation_quality_parameters(run, shot)
+    assert blocked.value.code == 'studio_context_workflow_required'

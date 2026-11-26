@@ -1028,6 +1028,12 @@ async def generate_for_shot(
     from app.services.model_lab import default_generation_parameters
     saved_defaults=default_generation_parameters(session,service_snapshot) if service_snapshot else {}
     effective_parameters = {"width": configured.get('width',640), "height": configured.get('height',384), "steps":20, **saved_defaults, **overrides}
+    if provider.name == "comfyui_h3" and "steps" not in overrides:
+        workflow_prompt, workflow_metadata = provider._load_workflow()
+        from app.services.providers import validate_sampling_contract
+        fixed_steps = validate_sampling_contract(workflow_prompt, workflow_metadata)
+        if fixed_steps is not None:
+            effective_parameters["steps"] = fixed_steps
     if h3_workflow:
         from app.services.video_quality import plan
         native = plan(quality)['generation']
@@ -1174,10 +1180,19 @@ async def generate_approved_shots(request: Request, project_id: str, payload: Ge
     if not shots:
         raise AppError(409, "no_approved_shots", "项目没有已批准分镜")
     if not settings_from(request).h3_demo_mode:
+        from app.services.ai_services import resolve_service
         from app.services.context_production_inputs import quality_for_shot
+        from app.services.studio_pipeline import wants_context_profile
         from app.services.video_services import select_video_service
-        select_video_service(session, settings_from(request), project_id, payload.service_id, payload.model_id,
-                             quality_mode=quality_for_shot(session, shots[0])['mode'])
+        selected_service_id = payload.service_id or payload.parameters.get('service_id')
+        selected_model_id = payload.model_id or payload.parameters.get('model_id')
+        _, selected_snapshot = resolve_service(session, 'video_generation', selected_service_id,
+                                               project_id, selected_model_id)
+        selection_options = {}
+        if wants_context_profile(settings_from(request), selected_snapshot):
+            selection_options['quality_mode'] = quality_for_shot(session, shots[0])['mode']
+        select_video_service(session, settings_from(request), project_id, selected_service_id,
+                             selected_model_id, **selection_options)
     results = []
     for shot in shots:
         job, video = await generate_for_shot(request, session, shot, payload)
@@ -1544,8 +1559,8 @@ def list_audit_events(limit: int = 100, session: Session = Depends(get_db)) -> l
 
 
 @router.get("/media/{relative_path:path}")
-def serve_media(request: Request, relative_path: str) -> FileResponse:
+def serve_media(request: Request, relative_path: str, download: bool = False) -> FileResponse:
     path = safe_media_path(settings_from(request).media_root, relative_path, must_exist=True)
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    return FileResponse(path, media_type=media_type, filename=None)
+    return FileResponse(path, media_type=media_type, filename=path.name if download else None)
 

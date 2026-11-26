@@ -494,3 +494,42 @@ def test_pause_committed_between_final_read_and_cas_is_not_overwritten(prepared,
     assert not list(session.scalars(select(m.AuditEvent).where(
         m.AuditEvent.object_id == run.id,
         m.AuditEvent.action == 'explicit_quality_applied_to_undispatched_nodes')))
+
+
+def test_native_h3_route_accepts_saved_fast_mode_for_legacy_run(context, settings):
+    session, _, project, shot, _ = context
+    high = QualitySettings(mode='high').model_dump()
+    fast = QualitySettings(mode='fast').model_dump()
+    route = {'configured': True, 'selected': {'service_snapshot': {
+        'provider': 'comfyui',
+        'settings': {'workflow_profile': 'native_h3_r2v', 'h3_context_ir': False},
+    }}}
+    run = m.StudioRun(project_id=project.id, status='paused',
+        snapshot_json={'shot_ids': [shot.id],
+            'options': {'quality': high, 'quality_by_shot': {shot.id: high}},
+            'routes_by_shot': {shot.id: {'video_generation': route}}},
+        nodes_json=[{'id': 'video:' + shot.id, 'kind': 'video',
+                     'target_id': shot.id, 'status': 'pending'}], result_json={})
+    profile = m.QualityProfile(scope='project', target_id=project.id, revision=1,
+                               settings_json=fast)
+    session.add_all([run, profile]); session.commit()
+
+    result = apply_saved_quality(session, settings, project.id, expected_profile_revision=1)
+
+    assert result['applied'] == []
+    assert result['run_status'] == 'paused'
+    assert run.snapshot_json['options']['quality_by_shot'][shot.id] == high
+
+
+def test_native_h3_quality_apply_requires_selected_route_snapshot():
+    from app.services.studio_quality_apply import _native_h3_video_route
+
+    native = {'configured': True, 'selected': {'service_snapshot': {
+        'provider': 'comfyui',
+        'settings': {'workflow_profile': 'native_h3_r2v', 'h3_context_ir': False},
+    }}}
+    assert _native_h3_video_route({'routes_by_shot': {'shot': {'video_generation': native}}}, 'shot')
+    assert not _native_h3_video_route({'services': {'video': {
+        'provider': 'comfyui',
+        'settings': {'workflow_profile': 'native_h3_r2v', 'h3_context_ir': False},
+    }}}, 'shot')

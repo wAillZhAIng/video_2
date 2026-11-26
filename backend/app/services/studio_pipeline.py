@@ -717,9 +717,15 @@ def generation_quality_parameters(run,shot):
     if context:
         result['steps'] = context['service']['h3_workflow']['actual_steps']
     elif snapshot.get('provider')=='comfyui':
-        if config.get('mode') == 'fast':
+        profile = snapshot.get('settings') or {}
+        native_h3 = (profile.get('workflow_profile') == 'native_h3_r2v'
+                     and profile.get('h3_context_ir') is not True)
+        if config.get('mode') == 'fast' and not native_h3:
             raise AppError(409, 'studio_context_workflow_required', 'Fast 需要新建 Context-IR 制作；原编排的本机工作流保持其历史设置')
-        result['steps']=12 if config.get('mode')=='preview' else plan(config)['generation']['steps']
+        if native_h3:
+            result['steps'] = 4
+        else:
+            result['steps'] = 12 if config.get('mode') == 'preview' else plan(config)['generation']['steps']
     return result
 
 

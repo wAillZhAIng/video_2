@@ -33,7 +33,7 @@ MODULES = {'character_generation': {'comfyui','openai_compatible','cloud_draft'}
 
 BUILTIN_VIDEO_WORKFLOWS = (
     {'id': 'context_ir', 'label': 'Context-IR 三档：Fast 4 / Quality 20 / Quality 30', 'h3_context_ir': True},
-    {'id': 'native_h3_r2v', 'label': '原生 H3 参考图工作流（20步）', 'h3_context_ir': False},
+    {'id': 'native_h3_r2v', 'label': '原生 H3 R2V 直连（4-step Turbo LoRA）', 'h3_context_ir': False},
 )
 
 

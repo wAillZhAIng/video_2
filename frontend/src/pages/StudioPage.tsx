@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ArrowRight, FileUp, RefreshCw, Plus, Play, Pause, FolderOpen, Wrench } from 'lucide-react';
+import { ArrowRight, FileUp, RefreshCw, Plus, Play, Pause, FolderOpen, Wrench, Download } from 'lucide-react';
 import { ApiError, api, MODEL_CONNECTIONS_RECHECKED, request } from '../lib/api';
 import type { PipelineStart, StudioOverview } from '../lib/studio-contract';
 import { PageHeader, EmptyState, LoadingState, FormField } from '../components/ui';
@@ -319,19 +319,39 @@ export function StudioPage() {
       <div className="studio-two-column"><section className="card studio-panel"><h2>人物与复用身份</h2>{characters.length ? characters.map((character, index) => <article className="studio-asset-row" key={character.id || character.character_id || index}>{studioAssetPath(character) ? <img src={api.mediaUrl(studioAssetPath(character))} alt={recordText(character.display_name || character.name)}/> : <span className="studio-avatar-placeholder" aria-hidden="true">人</span>}<div><strong>{recordText(character.display_name || character.name) || recordText(character.character_id)}</strong><p>{recordText(character.description || character.identity || character.status)}</p><small>{recordText(character.character_id || character.id)}</small>{character.acceptance?.actor==='automation'&&character.current_approved_version_id!==character.version_id?<p className="studio-muted">自动技术采纳，待视频审片</p>:null}</div><Link to={`/characters/${character.character_id || character.id}?project=${encodeURIComponent(projectId)}`}>查看／修改</Link></article>) : <p>文档尚未建立人物关联。</p>}</section>
       <section className="card studio-panel"><h2>场景与环境素材</h2>{scenes.length ? scenes.map((scene, index) => <article className="studio-asset-row" key={scene.id || scene.scene_id || index}>{studioAssetPath(scene) ? <img src={api.mediaUrl(studioAssetPath(scene))} alt={recordText(scene.name || scene.title)}/> : null}<div><strong>{recordText(scene.name || scene.title || scene.scene_title)}</strong><p>{recordText(scene.description || scene.location || scene.status)}</p><small>{recordText(scene.scene_id || scene.id)}</small></div><Link to={`/storyboard?project=${encodeURIComponent(projectId)}`}>查看／修改</Link></article>) : <p>文档尚未建立场景记录。</p>}</section></div>
       <section id="project-output" className="card studio-panel studio-final-output">
-        <div className="studio-section-heading"><h2>自动成片</h2>{finalRender ? <StudioStatus status={finalRender.status}/> : null}</div>
-        {finalPlayback ? <>
-          <video key={finalRender?.id} src={finalPlayback} controls playsInline preload="metadata" aria-label="本次自动成片"/>
-          {finalInfo?.width && finalInfo?.height && finalInfo?.fps ? <p>{finalInfo.width} × {finalInfo.height} · {finalInfo.fps} fps · {shotTime(finalInfo.duration)}</p> : null}
-          <a className="button button-primary" href={finalPlayback} download>下载 MP4</a>
-        </> : <p role="status">{recordText(data.run?.error_message) || (data.run?.status === 'rendering' ? '正在合成成片。' : data.run ? '本次制作尚未产出成片。' : '开始制作后，成片会在这里显示。')}</p>}
-        {retryFinal ? <button type="button" className="button button-secondary" disabled={pageBusy} onClick={() => void perform('retry-assembly', async () => {
-          await request(`/api/studio/projects/${encodeURIComponent(projectId)}/retry-assembly`, {method:'POST',body:JSON.stringify({expected_run_id:data.run?.id})});
-          setNotice('已提交成片重试，将复用本次通过技术检查的分镜。');
-        })}>重试成片</button> : null}
-        {previousExports.length ? <details className="workspace-details"><summary>历史成片</summary><ul>{previousExports.map(render => <li key={render.id}><a href={api.mediaUrl(render.relative_path)} download>{recordText(render.snapshot_json?.assembly_name) || '成片'} · {render.created_at ? new Date(render.created_at).toLocaleString() : render.id}</a></li>)}</ul></details> : null}
+        <div className="studio-section-heading"><h2>分镜与实际输出</h2></div>
+        <section className="studio-complete-output" aria-label="完整成片">
+          <div className="studio-output-subheading"><h3>完整成片</h3>{finalRender ? <StudioStatus status={finalRender.status}/> : null}</div>
+          {finalPlayback ? <>
+            <video className="studio-complete-video" key={finalRender?.id} src={finalPlayback} controls playsInline preload="metadata" aria-label="本次自动成片"/>
+            {finalInfo?.width && finalInfo?.height && finalInfo?.fps ? <p>{finalInfo.width} × {finalInfo.height} · {finalInfo.fps} fps · {shotTime(finalInfo.duration)}</p> : null}
+            {finalRender?.relative_path ? <a className="button button-primary" href={api.mediaDownloadUrl(finalRender.relative_path)} download><Download size={15}/>下载完整成片</a> : null}
+          </> : <p role="status">{recordText(data.run?.error_message) || (data.run?.status === 'rendering' ? '正在合成成片。' : data.run ? '本次制作尚未产出成片。' : '开始制作后，成片会在这里显示。')}</p>}
+          {retryFinal ? <button type="button" className="button button-secondary" disabled={pageBusy} onClick={() => void perform('retry-assembly', async () => {
+            await request(`/api/studio/projects/${encodeURIComponent(projectId)}/retry-assembly`, {method:'POST',body:JSON.stringify({expected_run_id:data.run?.id})});
+            setNotice('已提交成片重试，将复用本次通过技术检查的分镜。');
+          })}>重试成片</button> : null}
+          {previousExports.length ? <details className="workspace-details"><summary>历史成片</summary><ul>{previousExports.map(render => <li key={render.id}><a href={api.mediaDownloadUrl(render.relative_path)} download>{recordText(render.snapshot_json?.assembly_name) || '成片'} · {render.created_at ? new Date(render.created_at).toLocaleString() : render.id}</a></li>)}</ul></details> : null}
+        </section>
+        <div className="studio-output-subheading"><h3>逐镜输出</h3></div>
+        {shots.length ? <div className="studio-shot-table">{shots.map(shot => {
+          const relativePath = typeof shot.video?.relative_path === 'string' ? shot.video.relative_path : '';
+          const videoUrl = relativePath ? api.mediaUrl(relativePath) : '';
+          const downloadName = relativePath.split('/').pop() || `shot-${shot.order}.mp4`;
+          return <article key={shot.id}>
+            <strong>#{shot.order} · {shot.title || shot.scene_name}</strong>
+            <span>{shot.scene_name} · {shot.cast?.map(person => person.name).join('、') || '未关联人物'}</span>
+            <span>{shotTime(studioVideoDuration(shot.video) || shot.duration_seconds)}</span>
+            <StudioStatus status={shot.status}/>
+            <div className="studio-shot-output">
+              {videoUrl ? <>
+                <video className="studio-shot-preview" src={videoUrl} controls playsInline preload="metadata" aria-label={`第 ${shot.order} 镜视频预览`}/>
+                <a className="button button-secondary button-small" href={api.mediaDownloadUrl(relativePath)} download={downloadName}><Download size={14}/>下载本镜</a>
+              </> : <Link to={`/storyboard?project=${encodeURIComponent(projectId)}&shot=${encodeURIComponent(shot.id)}`}>查看分镜</Link>}
+            </div>
+          </article>;
+        })}</div> : <EmptyState title="还没有分镜" description="上传包含场景与人物动作的 Word 剧本，自动建立分镜和关联。"/>}
       </section>
-      <section className="card studio-panel"><div className="studio-section-heading"><h2>分镜与实际输出</h2></div>{shots.length ? <div className="studio-shot-table">{shots.map(shot => <article key={shot.id}><strong>#{shot.order} · {shot.title || shot.scene_name}</strong><span>{shot.scene_name} · {shot.cast?.map(person => person.name).join('、') || '未关联人物'}</span><span>{shotTime(studioVideoDuration(shot.video) || shot.duration_seconds)}</span><StudioStatus status={shot.status}/>{shot.video?.relative_path ? <a href={api.mediaUrl(shot.video.relative_path)} target="_blank" rel="noreferrer">播放本镜</a> : <Link to={`/storyboard?project=${encodeURIComponent(projectId)}&shot=${encodeURIComponent(shot.id)}`}>查看分镜</Link>}</article>)}</div> : <EmptyState title="还没有分镜" description="上传包含场景与人物动作的 Word 剧本，自动建立分镜和关联。"/>}</section>
       <details className="workspace-details"><summary>项目剧本与高级编辑</summary><p>{recordText(data.script?.raw_text || data.project.description).slice(0,1200) || '可通过下方入口查看源文档、人物和逐镜完整信息。'}</p><div className="studio-actions"><Link to={`/storyboard?project=${projectId}`}>源剧本与分镜</Link><Link to={`/storyboard?project=${encodeURIComponent(projectId)}`}>分镜设置与生成依据</Link><Link to={`/storyboard?project=${encodeURIComponent(projectId)}`}>查看分镜任务</Link><Link to="/content">历史与内容管理</Link></div></details>
     </> : null}
   </div>;

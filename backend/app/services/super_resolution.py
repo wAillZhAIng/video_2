@@ -15,7 +15,10 @@ def matches_service(provider, model_id, base_url):
 
 def runtime(settings, model_id=REALESRGAN_MODEL):
     portrait = model_id == PORTRAIT_MODEL
-    return {'python':os.getenv('VIDEO_FACTORY_UPSCALE_PYTHON','D:/Dev/Python/Envs/ComfyUI-Independent-20261011/Scripts/python.exe'),
+    default_python = '/venv/main/bin/python'
+    if not Path(default_python).is_file():
+        default_python = 'D:/Dev/Python/Envs/ComfyUI-Independent-20261011/Scripts/python.exe'
+    return {'python':os.getenv('VIDEO_FACTORY_UPSCALE_PYTHON', default_python),
         'model':str(settings.media_root.parent/'comfyui_runtime/models/upscale_models'/f'{model_id}.pth'),
         'script':str(PROJECT_ROOT/'scripts/upscale_video_realesrgan.py'),
         'verification':str(settings.media_root.parent/'super_resolution'/('verified-portrait.json' if portrait else 'verified.json'))}

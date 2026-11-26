@@ -43,6 +43,16 @@ def _same_route(left, right):
     return semantic(left) == semantic(right)
 
 
+def _native_h3_video_route(snapshot, shot_id):
+    route = (snapshot.get('routes_by_shot', {}).get(shot_id, {}).get('video_generation')
+             or snapshot.get('routes', {}).get('video_generation'))
+    service = ((route.get('selected') or {}).get('service_snapshot') if route else None)
+    profile = (service or {}).get('settings') or {}
+    return ((service or {}).get('provider') == 'comfyui'
+            and profile.get('workflow_profile') == 'native_h3_r2v'
+            and profile.get('h3_context_ir') is not True)
+
+
 def _quality_route(session, settings, project_id, shot_id, quality, options):
     if quality.processing == 'lanczos':
         # A nonempty per-shot entry shadows any inherited SeedVR2 snapshot.
@@ -177,9 +187,9 @@ def apply_saved_quality(session, settings, project_id, expected_profile_revision
     for shot_id in legacy_ids:
         override = quality_service.find_profile(session, 'shot', shot_id)
         requested = QualitySettings.model_validate(override.settings_json if override else project_settings)
-        if requested.mode == 'fast':
+        if requested.mode == 'fast' and not _native_h3_video_route(snapshot, shot_id):
             raise AppError(409, 'quality_apply_legacy_fast_requires_new_run',
-                           'Fast 使用 SMD4 与 Context-IR。已保存此设置，请新建制作以启用四步工作流。',
+                           'Fast 需要已冻结的原生 H3 4-step 路由；已保存此设置，请为该工作流新建制作。',
                            {'run_id': run.id, 'shot_id': shot_id})
     nodes = copy.deepcopy(run.nodes_json or [])
     proposals = []

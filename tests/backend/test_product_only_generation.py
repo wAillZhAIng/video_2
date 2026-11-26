@@ -281,9 +281,13 @@ def test_generation_entry_persists_null_character_version_and_product_manifest(p
 
 @pytest.mark.parametrize('kind', ['cloud', 'native'])
 def test_direct_generation_respects_selected_legacy_profile_without_context_quality(product_shot, monkeypatch, kind):
-    from app.services import ai_services, context_production_inputs, video_services
+    from app.services import ai_services, context_production_inputs, providers, video_services
     p = product_shot
     provider = ContractProvider()
+    if kind == 'native':
+        provider.name = 'comfyui_h3'
+        provider._load_workflow = lambda: ({}, {})
+        monkeypatch.setattr(providers, 'validate_sampling_contract', lambda *_args: 4)
     service = m.AIService(module='video_generation', name='Isolated direct ' + kind,
         provider='video_api' if kind == 'cloud' else 'comfyui',
         base_url='https://example.invalid/v1' if kind == 'cloud' else 'http://127.0.0.1:8189',
@@ -334,9 +338,59 @@ def test_direct_generation_respects_selected_legacy_profile_without_context_qual
     assert job.parameters_json['service_snapshot']['service_id'] == service.id
     assert job.parameters_json['service_snapshot']['settings'] == service.settings_json
     assert submitted.parameters['width'] == 1024 and submitted.parameters['height'] == 576
+    if kind == 'native':
+        assert submitted.parameters['steps'] == 4
     assert submitted.parameters['reference_manifest']['actors'] == []
     assert job.parameters_json['character_version_id'] is None
     assert submitted.reference_assets[0]['asset_id'] == p.picture.id
     assert job.reference_assets_json[0]['role'] == 'product'
     assert p.path.read_bytes() == original_bytes
     assert not p.session.scalar(select(func.count()).select_from(m.Character))
+
+
+def test_generate_approved_shots_native_h3_preflight_skips_context_ir_quality(product_shot, monkeypatch):
+    from app.services import ai_services, video_services
+
+    p = product_shot
+    service_id = 'native-h3-service'
+    model_id = 'minimax_h3_ref2va_pruned_w6a8.safetensors'
+    native_profile = {
+        'service_id': service_id,
+        'model_id': model_id,
+        'provider': 'comfyui',
+        'settings': {'workflow_profile': 'native_h3_r2v', 'h3_context_ir': False},
+    }
+    resolved = []
+    selected = []
+    generated = []
+
+    def contract_resolve(session, module, service_id_arg, project_id, model_id_arg):
+        assert session is p.session and module == 'video_generation'
+        assert service_id_arg == service_id and project_id == p.project.id
+        assert model_id_arg == model_id
+        resolved.append(service_id_arg)
+        return SimpleNamespace(id=service_id), native_profile
+
+    def contract_select(session, settings, project_id, service_id_arg, model_id_arg, **options):
+        assert session is p.session and settings is p.settings and project_id == p.project.id
+        assert service_id_arg == service_id and model_id_arg == model_id
+        selected.append(options)
+        return SimpleNamespace(id=service_id), native_profile, SimpleNamespace(name='comfyui_h3')
+
+    async def contract_generate(request, session, shot, payload):
+        generated.append(shot.id)
+        return SimpleNamespace(), None
+
+    monkeypatch.setattr(ai_services, 'resolve_service', contract_resolve)
+    monkeypatch.setattr(video_services, 'select_video_service', contract_select)
+    monkeypatch.setattr(routes, 'generate_for_shot', contract_generate)
+    monkeypatch.setattr(routes, 'row_dict', lambda _value: {})
+
+    request = Request({'type': 'http', 'app': SimpleNamespace(state=SimpleNamespace(settings=p.settings))})
+    result = run_contract(routes.generate_approved_shots(request, p.project.id,
+        GenerationRequest(service_id=service_id, model_id=model_id), p.session))
+
+    assert resolved == [service_id]
+    assert selected == [{}]
+    assert generated == [p.shot.id]
+    assert result == {'items': [{'job': {}, 'video_revision': None}], 'execution': 'serial'}
