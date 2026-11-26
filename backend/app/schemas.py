@@ -49,6 +49,10 @@ class ResolveUnknownVideoGeneration(StrictModel):
     operator: str = Field(default="local-user", min_length=1, max_length=100)
 
 
+# Keep the old import name available for deployments with older route modules.
+ResolveUnknownLocalGeneration = ResolveUnknownVideoGeneration
+
+
 class ShotBase(StrictModel):
     order: int = Field(ge=1, le=10_000)
     scene_title: str = Field(default="未命名分镜", max_length=240)
