@@ -9,7 +9,7 @@ from app.schemas import GenerationRequest
 from app.schemas_cinematic import VisualInput
 from app.schemas_product import AssemblyCreate,AssemblySubmit,TimelineRequest
 from app.services.screenplay import get
-from app.services.cinematic_quality import production_context,shot_preflight,generation_inputs_hash
+from app.services.cinematic_quality import frozen_generation_inputs_hash,production_context,shot_preflight,generation_inputs_hash
 from app.services.cinematic_visuals import build_visual
 
 
@@ -177,7 +177,7 @@ async def advance_run(app,settings,session,run):
                 if context and (step.get('repair_instruction') or
                     old.parameters_json.get('h3_workflow')!=context['service']['h3_workflow'] or
                     old.parameters_json.get('context_inputs',{}).get('fingerprint')!=context['inputs']['fingerprint']):continue
-                if old.parameters_json.get('screenplay_snapshot',{}).get('cinematic',{}).get('preflight',{}).get('generation_inputs_hash')==step['inputs_hash']:reused=video;break
+                if frozen_generation_inputs_hash(old.parameters_json)==step['inputs_hash']:reused=video;break
             if reused:step.update(video_id=reused.id,video_job_id=reused.generation_job_id,stage='approved_reused')
             else:
                 from app.api.routes import generate_for_shot

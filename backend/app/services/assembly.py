@@ -328,7 +328,7 @@ def run_render(settings, session_factory, identifier, music_assets=()):
                 assert_complete_revision(session,session.get(GenerationJob,video.generation_job_id),video)
         if snapshot.get('automatic_draft') or snapshot.get('automatic_final'):
             from app.services.studio_pipeline import _valid_video
-            from app.services.cinematic_quality import generation_inputs_hash
+            from app.services.cinematic_quality import frozen_generation_inputs_hash, generation_inputs_hash
             from app.models import StoryboardShot
             with session_factory() as session:
                 for clip in snapshot['clips']:
@@ -338,7 +338,9 @@ def run_render(settings, session_factory, identifier, music_assets=()):
                     if video.metadata_json.get('sha256')!=clip['sha256']:
                         raise AppError(409,'draft_video_changed','草稿输入文件哈希记录已变化')
                     job=session.get(GenerationJob,video.generation_job_id);shot=session.get(StoryboardShot,video.shot_id)
-                    expected=(job.parameters_json.get('screenplay_snapshot',{}).get('cinematic',{}).get('preflight',{}).get('generation_inputs_hash')) if job else None
+                    expected=frozen_generation_inputs_hash(job.parameters_json) if job else None
+                    if not expected:
+                        expected=(snapshot.get('automatic_generation_inputs_by_shot') or {}).get(video.shot_id)
                     if not shot or not expected or expected!=generation_inputs_hash(session,shot):
                         raise AppError(409,'draft_video_changed','草稿镜头输入已变化，不能继续渲染')
                     _valid_video(session,settings,video)

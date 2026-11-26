@@ -952,6 +952,7 @@ async def generate_for_shot(
 
     from app.services.model_lab import frozen_generation_inputs
     from app.services.context_production_inputs import collect_context_inputs, quality_for_shot, restore_context_inputs
+    from app.services.cinematic_quality import generation_inputs_hash
     from app.services.motion_references import resolve_motion_references, verify_motion_sources
     from app.services.video_services import existing_provider, select_video_service
 
@@ -1013,7 +1014,6 @@ async def generate_for_shot(
         if settings.h3_demo_mode or provider.name!='comfyui_h3':
             raise AppError(409,'motion_reference_provider_unsupported','所选服务未实现视频动作参考；未提交或退回纯文本生成')
         await asyncio.to_thread(verify_motion_sources,motion_references)
-        from app.services.cinematic_quality import generation_inputs_hash
         motion_inputs_hash=generation_inputs_hash(session,shot)
         prompt+='\nMotion reference guidance: '+ ' '.join(f'<Video {index}> supplies the approved motion and camera reference for this shot; identity follows its separate picture references.' for index in range(1,len(motion_references)+1))
     if service_snapshot and service_snapshot.get('settings', {}).get('video_contract') == 'wan26-i2v' and len(references) != 1:
@@ -1067,7 +1067,8 @@ async def generate_for_shot(
         status="running" if settings.h3_demo_mode else "queued",
         prompt=prompt,
         parameters_json={**effective_parameters, 'script_revision_id': script.id, 'duration_seconds': shot.duration_seconds,
-            'aspect_ratio': shot.aspect_ratio, 'negative_prompt': negative, 'instruction': instruction,
+            'aspect_ratio': shot.aspect_ratio, 'generation_inputs_hash': generation_inputs_hash(session,shot),
+            'negative_prompt': negative, 'instruction': instruction,
             'compiled_prompt': compiled_prompt, 'prompt_override_used': prompt_override is not None, 'prompt_override': prompt_override,
             'character_version_id': version_id, **({'screenplay_snapshot': screenplay_snapshot} if screenplay_snapshot else {}),
             **({'revision_postprocess': revision_postprocess} if revision_postprocess else {}),

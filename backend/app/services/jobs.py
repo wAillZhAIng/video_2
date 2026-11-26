@@ -416,7 +416,7 @@ def recheck_cloud_duration_warning(session, settings, video):
     Historical checks remain immutable and a new audited check is appended.
     """
     from app.models import StoryboardShot
-    from app.services.cinematic_quality import generation_inputs_hash, inspect_generated
+    from app.services.cinematic_quality import frozen_generation_inputs_hash, generation_inputs_hash, inspect_generated
     job=session.get(GenerationJob,video.generation_job_id)
     if (not job or job.project_id!=video.project_id or job.shot_id!=video.shot_id
         or job.status!='failed' or job.error_code!='output_quality_failed'
@@ -424,8 +424,7 @@ def recheck_cloud_duration_warning(session, settings, video):
         or job.parameters_json.get('service_snapshot',{}).get('provider')!='video_api'):
         raise AppError(409,'duration_recheck_unavailable','仅可重新检测原始云端视频规格偏差，未重发任务')
     shot=session.get(StoryboardShot,video.shot_id)
-    cinematic=job.parameters_json.get('screenplay_snapshot',{}).get('cinematic',{})
-    expected_hash=cinematic.get('preflight',{}).get('generation_inputs_hash')
+    expected_hash=frozen_generation_inputs_hash(job.parameters_json)
     if not shot or not expected_hash or generation_inputs_hash(session,shot)!=expected_hash:
         raise AppError(409,'video_inputs_stale','镜头、人物或参考素材已变化，不能恢复旧视频')
     audio_events=job.parameters_json.get('screenplay_snapshot',{}).get('resolved_audio_events',[])

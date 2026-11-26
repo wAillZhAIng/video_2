@@ -22,7 +22,7 @@ def draft_timeline(session, settings, assembly, payload):
     if not marker:
         return validate_timeline(session, settings, assembly.project_id, payload)
     from app.models import GenerationJob, StoryboardShot, VideoRevision
-    from app.services.cinematic_quality import generation_inputs_hash
+    from app.services.cinematic_quality import frozen_generation_inputs_hash, generation_inputs_hash
     from app.services.studio_pipeline import _valid_video
     original_ids = {clip['video_id'] for clip in assembly.timeline_json.get('clips', [])}
     # Keep previously removed draft clips selectable from immutable render
@@ -39,7 +39,9 @@ def draft_timeline(session, settings, assembly, payload):
             raise AppError(422, 'draft_input_not_in_timeline', '待审核片段须来自该草稿原时间线；新增片段请先审核')
         job = session.get(GenerationJob, video.generation_job_id)
         shot = session.get(StoryboardShot, video.shot_id)
-        expected = (job.parameters_json.get('screenplay_snapshot', {}).get('cinematic', {}).get('preflight', {}).get('generation_inputs_hash')) if job else None
+        expected = frozen_generation_inputs_hash(job.parameters_json) if job else None
+        if not expected:
+            expected = (assembly.timeline_json.get('automatic_generation_inputs_by_shot') or {}).get(video.shot_id)
         if not shot or not expected or expected != generation_inputs_hash(session, shot):
             raise AppError(409, 'draft_video_changed', '草稿片段的镜头输入已变化，请重新生成或审核')
         _valid_video(session, settings, video)

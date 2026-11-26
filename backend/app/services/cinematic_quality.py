@@ -127,6 +127,22 @@ def generation_inputs_hash(session,shot):
     return fingerprint({'visual':visual_inputs(session,shot),'duration':shot.duration_seconds,'aspect_ratio':shot.aspect_ratio,'dialogue':dialogue,'audio':audio})
 
 
+def frozen_generation_inputs_hash(parameters, *, fallback=None):
+    """Read the canonical video-input identity independently of cinematic metadata.
+
+    New jobs persist this at the parameters root.  The nested value is read only
+    for pre-migration frozen jobs; it is not a generation or routing branch.
+    """
+    if not isinstance(parameters,dict): return fallback
+    value=parameters.get('generation_inputs_hash')
+    if isinstance(value,str) and value: return value
+    snapshot=parameters.get('screenplay_snapshot')
+    cinematic=snapshot.get('cinematic') if isinstance(snapshot,dict) else None
+    preflight=cinematic.get('preflight') if isinstance(cinematic,dict) else None
+    value=preflight.get('generation_inputs_hash') if isinstance(preflight,dict) else None
+    return value if isinstance(value,str) and value else fallback
+
+
 def shot_preflight(session,settings,shot,require_visual=True,*,context_inputs=False,explicit_visual_ids=None,explicit_motion=None,
                    revision_references=()):
     from app.services.screenplay import shot_bundle

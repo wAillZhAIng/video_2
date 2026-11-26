@@ -171,11 +171,10 @@ def _plan(session, settings, project_id, node_id, payload):
     run, node, shot, context = _current(session, settings, project_id, node_id, payload.expected_run_id)
     if context['source_fingerprint'] != payload.source_fingerprint:
         _error('audio_resolution_stale', '原片、配音或任务状态已变化，请刷新后重新预览')
-    from app.services.cinematic_quality import generation_inputs_hash
+    from app.services.cinematic_quality import frozen_generation_inputs_hash, generation_inputs_hash
     source_video = get(session, m.VideoRevision, context['video']['id'])
     source_job = get(session, m.GenerationJob, source_video.generation_job_id)
-    original_hash = (source_job.parameters_json.get('screenplay_snapshot', {}).get('cinematic', {})
-                     .get('preflight', {}).get('generation_inputs_hash'))
+    original_hash = frozen_generation_inputs_hash(source_job.parameters_json)
     if not original_hash or original_hash != generation_inputs_hash(session, shot):
         _error('audio_resolution_source_stale', '镜头资料与原片冻结输入不一致，请明确新建制作；音频处理不会悄悄使用修改后的剧本或素材')
     parameters, warnings = {}, ['原片、原音频和历史任务完整保留；新结果仍需人工审核。']

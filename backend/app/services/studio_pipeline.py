@@ -30,7 +30,7 @@ from app.schemas_cinematic import VisualInput
 from app.schemas_studio import PipelineStart
 from app.services.ai_services import resolve_service
 from app.services.cinematic_rules import fingerprint
-from app.services.cinematic_quality import production_context, generation_inputs_hash, visual_inputs, shot_preflight
+from app.services.cinematic_quality import production_context, generation_inputs_hash, frozen_generation_inputs_hash, visual_inputs, shot_preflight
 from app.services.screenplay import get, row, approved_reference_ids, shot_bundle
 from app.services.screenplay_production_status import sync_production_status
 
@@ -936,7 +936,7 @@ async def _video(app, session, settings, run, entry, dispatch):
             _failure(entry, job.error_code or 'video_'+job.status, job.error_message or '视频生成失败', unknown=job.status in {'unknown','closed_unknown'}, transient=retryable, max_retries=options['max_retries']); return
         video = session.scalar(select(m.VideoRevision).where(m.VideoRevision.generation_job_id == job.id))
         if not video: raise AppError(409, 'studio_video_output_missing', '任务已结束但没有真实视频记录')
-        expected_hash = job.parameters_json.get('screenplay_snapshot', {}).get('cinematic', {}).get('preflight', {}).get('generation_inputs_hash')
+        expected_hash = frozen_generation_inputs_hash(job.parameters_json)
         if expected_hash and expected_hash != generation_inputs_hash(session, shot):
             raise AppError(409, 'studio_video_stale', '生成期间镜头内容已变化；真实旧视频已保留，请仅重生成当前镜头')
         _valid_video(session, settings, video)
@@ -960,7 +960,7 @@ async def _video(app, session, settings, run, entry, dispatch):
                         not reuse_reason):
                     continue
             elif not _matching_route_output(run,'video_generation',shot.id,{'service_snapshot':previous.parameters_json.get('service_snapshot',{})},previous.parameters_json,generation_parameters(run,shot)):continue
-            actual = previous.parameters_json.get('screenplay_snapshot', {}).get('cinematic', {}).get('preflight', {}).get('generation_inputs_hash')
+            actual = frozen_generation_inputs_hash(previous.parameters_json)
             instruction=str(options.get('instructions',{}).get(shot.id,'') or '').strip()
             if previous.parameters_json.get('prompt_override') != options.get('prompt_overrides',{}).get(shot.id):continue
             if shot.id in options.get('quality_by_shot',{}):
@@ -1092,6 +1092,7 @@ def _queue_automatic_render(session, settings, run, nodes, *, retry=False):
     if target and len(shot_ids) > 20:
         raise AppError(422, 'automatic_final_clip_limit', '自动成片每次最多支持 20 个镜头')
     videos = []
+    input_hashes = {}
     for shot_id in shot_ids:
         leaf=_leaf(nodes,shot_id)
         if not leaf or leaf.get('status')!='succeeded' or not leaf.get('video_id'):
@@ -1103,11 +1104,12 @@ def _queue_automatic_render(session, settings, run, nodes, *, retry=False):
         shot=get(session,m.StoryboardShot,shot_id)
         if target and (job.provider == 'demo' or video.metadata_json.get('mode') == 'demo'):
             raise AppError(409, 'automatic_final_real_video_required', '自动成片需要真实模型生成的视频')
-        original=(job.parameters_json.get('screenplay_snapshot',{}).get('cinematic',{}).get('preflight',{}).get('generation_inputs_hash'))
+        original=frozen_generation_inputs_hash(job.parameters_json, fallback=leaf.get('inputs_hash'))
         if not original or original!=generation_inputs_hash(session,shot):
             raise AppError(409,'draft_video_stale','镜头输入与视频快照不一致，不创建草稿')
         _valid_video(session,settings,video)
         videos.append(video)
+        input_hashes[shot_id]=original
     if not videos: raise AppError(409,'draft_inputs_incomplete','没有视频可合成')
     route=_route(run,'final_assembly')
     service_id=None
@@ -1130,6 +1132,7 @@ def _queue_automatic_render(session, settings, run, nodes, *, retry=False):
         output = {'resolution_mode':'source','fps':24,'codec':'libx264','audio_policy':'preserve','subtitles':False}
     config=TimelineRequest.model_validate({'clips':clips,'transitions':transitions,'output':output,'service_id':service_id})
     timeline=validate_timeline(session,settings,run.project_id,config,allow_unreviewed_draft=True)
+    timeline['automatic_generation_inputs_by_shot']=input_hashes
     transition_types = [edge['type'] for edge in transitions]
     policy = {'studio_run_id':run.id,'transition':'cut' if set(transition_types)<= {'cut'} else 'screenplay',
               'transition_types':transition_types,'full_streams':all(clip.get('trim_end') is None for clip in clips),
@@ -1318,8 +1321,7 @@ def _overview_video(session, shot, leaf):
         current_hash = generation_inputs_hash(session, shot)
         for candidate in candidates:
             job = session.get(m.GenerationJob, candidate.generation_job_id)
-            expected = (job.parameters_json.get('screenplay_snapshot', {}).get('cinematic', {})
-                        .get('preflight', {}).get('generation_inputs_hash'))
+            expected = frozen_generation_inputs_hash(job.parameters_json)
             if expected and expected == current_hash and processing_ready(candidate):
                 return candidate
     return baseline if baseline.review_status in {'pending', 'approved'} and processing_ready(baseline) else None
