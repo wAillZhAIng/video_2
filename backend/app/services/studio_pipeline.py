@@ -1095,6 +1095,7 @@ def _queue_automatic_render(session, settings, run, nodes, *, retry=False):
     input_hashes = {}
     for shot_id in shot_ids:
         leaf=_leaf(nodes,shot_id)
+        video_entry=next((entry for entry in nodes if entry['kind']=='video' and entry['target_id']==shot_id),None)
         if not leaf or leaf.get('status')!='succeeded' or not leaf.get('video_id'):
             raise AppError(409,'draft_inputs_incomplete','所有镜头须完成真实视频及技术检查后才能创建自动草稿')
         video=get(session,m.VideoRevision,leaf['video_id'])
@@ -1104,7 +1105,7 @@ def _queue_automatic_render(session, settings, run, nodes, *, retry=False):
         shot=get(session,m.StoryboardShot,shot_id)
         if target and (job.provider == 'demo' or video.metadata_json.get('mode') == 'demo'):
             raise AppError(409, 'automatic_final_real_video_required', '自动成片需要真实模型生成的视频')
-        original=frozen_generation_inputs_hash(job.parameters_json, fallback=leaf.get('inputs_hash'))
+        original=frozen_generation_inputs_hash(job.parameters_json, fallback=(video_entry or {}).get('inputs_hash'))
         if not original or original!=generation_inputs_hash(session,shot):
             raise AppError(409,'draft_video_stale','镜头输入与视频快照不一致，不创建草稿')
         _valid_video(session,settings,video)
