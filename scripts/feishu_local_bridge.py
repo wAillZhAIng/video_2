@@ -306,8 +306,10 @@ def feishu_list_records(api_base: str, token: str, app_token: str, table_id: str
     return items
 
 
-def feishu_download_media(api_base: str, token: str, file_token: str, dest: Path) -> Path:
+def feishu_download_media(api_base: str, token: str, file_token: str, dest: Path, expected_size: int = 0) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_file() and expected_size > 0 and dest.stat().st_size == expected_size:
+        return dest
     url = f"{api_base}/open-apis/drive/v1/medias/{file_token}/download"
     with httpx.Client(timeout=180.0, follow_redirects=True) as client:
         with client.stream("GET", url, headers=feishu_headers(token)) as resp:
@@ -406,24 +408,88 @@ def build_agent_prompt(
 """
 
 
-def _extract_json_dict_from_text(text: str) -> dict[str, Any] | None:
+def build_antigravity_batch_prompt(
+    *,
+    pending_rows: list[dict[str, Any]],
+    analysis_prompt: str,
+    script_count: int,
+    script_cols: list[str],
+    job_id: str,
+) -> str:
+    user_req = analysis_prompt.strip() or (
+        "保留参考视频的镜头节奏、景别与物理交互结构，严格保持参考图中的产品外观一致性，"
+        "生成彼此场景、手部肤色/美甲或服装袖口各不相同的带货分镜脚本。"
+    )
+    items_blocks: list[str] = []
+    for idx, row in enumerate(pending_rows, start=1):
+        rid = row["rid"]
+        imgs_text = "\n".join(f"  - {p}" for p in row["image_locals"]) if row["image_locals"] else "  - (无参考图)"
+        items_blocks.append(
+            f"### 第 {idx}/{len(pending_rows)} 条记录（record_id: `{rid}`）\n"
+            f"- 产品名称：{row['product_name']}\n"
+            f"- 任务名称：{row['task_name']}\n"
+            f"- 参考视频：{row['video_local']}\n"
+            f"- 参考图：\n{imgs_text}\n"
+            f"- rea-video 已预拆解目录：{row['rea_out']}\n"
+            f"- 本条输出文件路径（位于你当前对话的 `<Artifact Directory Path>/scratch/` 内）：`scripts_{rid}.json`"
+        )
+    tasks_section = "\n\n".join(items_blocks)
+    single_note = (
+        "\n   - （本批次仅 1 条记录，你也可以直接将严格合法的 ```json ... ``` 代码块输出在最终回复正文中。）"
+        if len(pending_rows) == 1
+        else ""
+    )
+    return f"""请使用 rea-video 技能，在**当前这一个固定对话内**按顺序逐条解析本批次全部 {len(pending_rows)} 条飞书参考视频记录（批次 `{job_id}`），并为**每一条记录**生成恰好 {script_count} 份彼此不同的成品视频分镜脚本。
+
+【用户分析视频提示词与脚本内容要求（全部记录均须严格遵守）】
+{user_req}
+
+【待解析记录列表（共 {len(pending_rows)} 条，请严格按 1 -> {len(pending_rows)} 顺序逐条处理）】
+{tasks_section}
+
+【输出格式与零阻塞执行规则（极其重要）】
+1. **严格逐条执行（固定单会话）**：不要新建其他对话，不要把多条记录合并进同一个 JSON。每条记录必须生成 **恰好 {script_count} 份彼此不同的分镜脚本**，分别对应飞书列：{', '.join(script_cols)}。
+2. 每份脚本文本必须直接适配 video_2 分镜解析器，采用清晰分段的分镜格式（包含全局设定与 `镜头1（0-5秒）`、`镜头2（5-10秒）`...，每镜明确画面主体、动作轨迹、运镜、光线、产品一致性细节与音效）。
+3. **零审批阻塞规则**：
+   - 每条记录的 `rea-video decompose` 已提前跑完，结果位于各自的 `rea_out` 目录（`VIDEO.md`、`video/*.md`、`video/shots/*.md`、`storyboard.jpg`、`shots/shot_*.jpg`），请**只使用 `read_file`** 查看这些资料与参考图；
+   - **禁止调用 `run_command`**；
+   - **禁止向 `<Artifact Directory Path>/scratch/` 以外的任何路径调用 `write_file` / `edit_file`**（写外部路径会触发人工审批弹窗卡住流程！）；
+   - 每完成第 `i` 条记录的分析后，**立即**调用 `write_file`（`Overwrite=true`，**不要提供 `ArtifactMetadata`**）把严格合法的 UTF-8 JSON 写入你当前对话目录的 `<Artifact Directory Path>/scratch/scripts_<record_id>.json`（注意把 `<Artifact Directory Path>` 替换为你本会话真实的 Artifact Directory Path，例如 `C:\\Users\\MSI\\.gemini\\antigravity\\brain\\<你的Conversation ID>\\scratch\\scripts_<record_id>.json`），JSON 结构如下：
+```json
+{{
+  "record_id": "<该条记录的 record_id>",
+  "summary": "一句话总结参考视频拆解要点（镜头数、总时长、节奏风格）",
+  "scripts": [
+    {{"index": 1, "column": "{script_cols[0]}", "text": "完整分镜脚本1文本..."}},
+    ...
+  ]
+}}
+```
+   - 写入完第 `i` 条的 `scripts_<record_id>.json` 后，立刻在下一轮继续解析第 `i+1` 条，直至全部 {len(pending_rows)} 条均落盘完成。{single_note}
+"""
+
+
+def _extract_all_json_dicts_from_text(text: str) -> list[dict[str, Any]]:
     if not text:
-        return None
-    # 1. Try fenced ```json ... ``` blocks first (prefer last one)
-    for block in reversed(re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)):
+        return []
+    found: list[dict[str, Any]] = []
+    # 1. Try fenced ```json ... ``` blocks
+    for block in re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text):
         try:
             obj = json.loads(block)
             if isinstance(obj, dict) and isinstance(obj.get("scripts"), list) and obj["scripts"]:
-                return obj
+                found.append(obj)
         except Exception:
             continue
+    if found:
+        return found
     # 2. Try direct parse
     stripped = text.strip()
     if stripped.startswith("{"):
         try:
             obj = json.loads(stripped)
             if isinstance(obj, dict) and isinstance(obj.get("scripts"), list) and obj["scripts"]:
-                return obj
+                return [obj]
         except Exception:
             pass
     # 3. Try greedy outer braces
@@ -432,18 +498,51 @@ def _extract_json_dict_from_text(text: str) -> dict[str, Any] | None:
         try:
             obj = json.loads(m.group(0))
             if isinstance(obj, dict) and isinstance(obj.get("scripts"), list) and obj["scripts"]:
-                return obj
+                return [obj]
         except Exception:
             pass
-    return None
+    return []
 
 
-def _extract_scripts_from_antigravity_transcript(conv_id: str) -> dict[str, Any] | None:
-    if not conv_id:
-        return None
-    brain_dir = Path.home() / ".gemini" / "antigravity" / "brain" / conv_id / ".system_generated" / "logs"
+def _extract_json_dict_from_text(text: str) -> dict[str, Any] | None:
+    items = _extract_all_json_dicts_from_text(text)
+    return items[-1] if items else None
+
+
+def _extract_batch_scripts_from_antigravity(
+    conv_id: str,
+    remaining_rids: set[str],
+    total_pending: int,
+) -> dict[str, dict[str, Any]]:
+    """Collect any newly ready per-record script JSONs from scratch files OR transcript logs."""
+    results: dict[str, dict[str, Any]] = {}
+    if not conv_id or not remaining_rids:
+        return results
+    brain_root = Path.home() / ".gemini" / "antigravity" / "brain" / conv_id
+
+    # 1. Primary source: zero-approval artifact scratch files written by the conversation
+    for rid in list(remaining_rids):
+        for cand in (
+            brain_root / "scratch" / f"scripts_{rid}.json",
+            brain_root / f"scripts_{rid}.json",
+        ):
+            if cand.is_file() and cand.stat().st_size > 20:
+                try:
+                    obj = json.loads(cand.read_text(encoding="utf-8-sig"))
+                    if isinstance(obj, dict) and isinstance(obj.get("scripts"), list) and obj["scripts"]:
+                        results[rid] = obj
+                        break
+                except Exception:
+                    pass
+
+    still_missing = remaining_rids - set(results.keys())
+    if not still_missing:
+        return results
+
+    # 2. Fallback source: transcript_full.jsonl / transcript.jsonl (write_file Content OR assistant text)
+    logs_dir = brain_root / ".system_generated" / "logs"
     for fname in ("transcript_full.jsonl", "transcript.jsonl"):
-        tpath = brain_dir / fname
+        tpath = logs_dir / fname
         if not tpath.is_file():
             continue
         try:
@@ -459,27 +558,79 @@ def _extract_scripts_from_antigravity_transcript(conv_id: str) -> dict[str, Any]
                 continue
             if entry.get("type") != "PLANNER_RESPONSE":
                 continue
-            # A. Check assistant text response / content
+
+            # A. Check write_file tool_calls
+            for tc in entry.get("tool_calls") or []:
+                if tc.get("name") != "write_file":
+                    continue
+                args = tc.get("args") or {}
+                raw_path = str(args.get("Path") or "")
+                raw_content = args.get("Content")
+                if not isinstance(raw_content, str):
+                    continue
+                try:
+                    unwrapped = json.loads(raw_content) if raw_content.startswith('"') else raw_content
+                except Exception:
+                    unwrapped = raw_content
+                if not isinstance(unwrapped, str):
+                    continue
+                for obj in _extract_all_json_dicts_from_text(unwrapped):
+                    matched_rid = str(obj.get("record_id") or "").strip()
+                    if not matched_rid:
+                        for cand_rid in still_missing:
+                            if cand_rid in raw_path:
+                                matched_rid = cand_rid
+                                break
+                    if not matched_rid and total_pending == 1 and len(still_missing) == 1:
+                        matched_rid = next(iter(still_missing))
+                    if matched_rid in still_missing and matched_rid not in results:
+                        results[matched_rid] = obj
+
+            # B. Check assistant text response / content
             for field in ("response", "content", "text"):
                 val = entry.get(field)
-                if isinstance(val, str):
-                    parsed = _extract_json_dict_from_text(val)
-                    if parsed:
-                        return parsed
-            # B. Fallback: if model called write_file with Content (even while awaiting approval)
-            for tc in entry.get("tool_calls") or []:
-                if tc.get("name") == "write_file":
-                    raw_content = (tc.get("args") or {}).get("Content")
-                    if isinstance(raw_content, str):
-                        try:
-                            unwrapped = json.loads(raw_content) if raw_content.startswith('"') else raw_content
-                        except Exception:
-                            unwrapped = raw_content
-                        if isinstance(unwrapped, str):
-                            parsed = _extract_json_dict_from_text(unwrapped)
-                            if parsed:
-                                return parsed
-    return None
+                if not isinstance(val, str):
+                    continue
+                for obj in _extract_all_json_dicts_from_text(val):
+                    matched_rid = str(obj.get("record_id") or "").strip()
+                    if not matched_rid and total_pending == 1 and len(still_missing) == 1:
+                        matched_rid = next(iter(still_missing))
+                    if matched_rid in still_missing and matched_rid not in results:
+                        results[matched_rid] = obj
+
+            still_missing = remaining_rids - set(results.keys())
+            if not still_missing:
+                return results
+    return results
+
+
+def _extract_scripts_from_antigravity_transcript(conv_id: str) -> dict[str, Any] | None:
+    res = _extract_batch_scripts_from_antigravity(conv_id, {"__single__"}, total_pending=1)
+    return res.get("__single__")
+
+
+def _parse_codex_jsonl_stdout(stdout: str) -> tuple[str | None, str]:
+    thread_id: str | None = None
+    last_agent_text = ""
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") == "thread.started" and ev.get("thread_id"):
+            thread_id = str(ev["thread_id"]).strip()
+        elif not thread_id and ev.get("session_id"):
+            thread_id = str(ev["session_id"]).strip()
+        if ev.get("type") == "item.completed":
+            item = ev.get("item") or {}
+            if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                last_agent_text = item["text"]
+    return thread_id, last_agent_text
 
 
 def parse_scripts_output(output_json_path: Path, fallback_text: str, script_cols: list[str], raw_obj: dict[str, Any] | None = None) -> tuple[str, list[dict[str, Any]]]:
@@ -512,71 +663,164 @@ def parse_scripts_output(output_json_path: Path, fallback_text: str, script_cols
     return summary, out
 
 
-def run_codex_engine(prompt: str, work_dir: Path, output_json_path: Path, script_cols: list[str]) -> tuple[str, list[dict[str, Any]]]:
+def run_codex_engine(
+    prompt: str,
+    work_dir: Path,
+    output_json_path: Path,
+    script_cols: list[str],
+    *,
+    session_root: Path | None = None,
+    thread_id: str | None = None,
+) -> tuple[str, list[dict[str, Any]], str | None]:
     codex_exe = find_codex_exe()
     if not codex_exe:
         raise RuntimeError("未在本机找到 codex.exe，请先安装 Codex 或切换为 Antigravity 引擎")
     last_msg = work_dir / "codex_last_message.txt"
     if output_json_path.exists():
         output_json_path.unlink()
-    cmd = [
-        codex_exe,
-        "exec",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "-C", str(work_dir),
-        "-o", str(last_msg),
-        prompt,
-    ]
-    log(f"Invoking Codex CLI for rea-video script generation in {work_dir}")
-    proc = subprocess.run(cmd, env=build_tool_env(), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
-    fallback = last_msg.read_text(encoding="utf-8", errors="replace") if last_msg.is_file() else (proc.stdout or "")
+    if last_msg.exists():
+        last_msg.unlink()
+    cwd_root = session_root or work_dir
+    if thread_id:
+        cmd = [
+            codex_exe,
+            "exec",
+            "resume",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "--json",
+            "-o", str(last_msg),
+            thread_id,
+            "-",
+        ]
+        log(f"Resuming fixed batch Codex conversation {thread_id} for {work_dir.name}")
+    else:
+        cmd = [
+            codex_exe,
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "--json",
+            "-C", str(cwd_root),
+            "-o", str(last_msg),
+            "-",
+        ]
+        log(f"Starting fixed batch Codex conversation in {cwd_root} for {work_dir.name}")
+    proc = subprocess.run(
+        cmd,
+        input=prompt,
+        env=build_tool_env(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=900,
+    )
+    parsed_tid, agent_msg = _parse_codex_jsonl_stdout(proc.stdout or "")
+    effective_tid = parsed_tid or thread_id
+    fallback = last_msg.read_text(encoding="utf-8", errors="replace") if last_msg.is_file() else (agent_msg or proc.stdout or "")
     if proc.returncode != 0 and not output_json_path.is_file():
         raise RuntimeError(f"Codex 执行失败 (code={proc.returncode}): {(proc.stderr or proc.stdout)[-500:]}")
-    return parse_scripts_output(output_json_path, fallback, script_cols)
+    summary, scripts = parse_scripts_output(output_json_path, fallback, script_cols)
+    return summary, scripts, effective_tid
 
 
-def run_antigravity_engine(prompt: str, work_dir: Path, output_json_path: Path, script_cols: list[str], title: str) -> tuple[str, list[dict[str, Any]]]:
+def run_antigravity_batch_engine(
+    *,
+    job_id: str,
+    pending_rows: list[dict[str, Any]],
+    analysis_prompt: str,
+    script_count: int,
+    script_cols: list[str],
+    on_row_ready: Any,
+) -> str:
+    """Use ONE fixed Antigravity conversation for all pending rows in a sync batch."""
     addr, csrf = load_antigravity_endpoint()
     if not addr or not csrf:
         raise RuntimeError(
             "未检测到本地 Antigravity ConversationService 端点。请确保 Antigravity 客户端已启动，"
             f"并已写入端点配置 {ENDPOINT_FILE}（或由 Antigravity 环境启动桥接）。"
         )
-    if output_json_path.exists():
-        output_json_path.unlink()
+    for row in pending_rows:
+        if row["scripts_out_path"].exists():
+            row["scripts_out_path"].unlink()
+
     headers = {
         "Content-Type": "application/json",
         "Connect-Protocol-Version": "1",
         "x-antigravity-csrf-token": csrf,
     }
-    log(f"Creating Antigravity conversation via http://{addr} for {title}")
+    prompt = build_antigravity_batch_prompt(
+        pending_rows=pending_rows,
+        analysis_prompt=analysis_prompt,
+        script_count=script_count,
+        script_cols=script_cols,
+        job_id=job_id,
+    )
+    title = f"飞书批量脚本生成 · {job_id[-8:]}（{len(pending_rows)}条）"[:80]
+    log(f"Creating SINGLE fixed Antigravity batch conversation via http://{addr} for {len(pending_rows)} rows ({job_id})")
     with httpx.Client(timeout=30.0) as client:
         resp = client.post(
             f"http://{addr}/product.v1.ConversationService/CreateConversation",
             headers=headers,
             json={
-                "title": f"飞书视频解析 · {title}"[:80],
-                "tags": ["feishu-sync", "rea-video"],
+                "title": title,
+                "tags": ["feishu-sync", "rea-video", f"batch-{job_id[-8:]}"],
                 "prompt": [{"text": prompt}],
             },
         )
         if resp.status_code != 200:
             raise RuntimeError(f"调用 Antigravity CreateConversation 失败: HTTP {resp.status_code} {resp.text[:300]}")
         conv_id = ((resp.json().get("conversation") or {}).get("id")) or ""
-    log(f"Antigravity conversation started: {conv_id}, waiting for {output_json_path}")
+    log(f"Fixed batch Antigravity conversation started: {conv_id} for {len(pending_rows)} rows")
+    post_progress(
+        job_id,
+        status="analyzing",
+        current_stage=f"已在固定 Antigravity 会话（{conv_id[:8]}）中连续解析 {len(pending_rows)} 条记录…",
+        log=f"本批次固定使用单个 Antigravity 会话：{conv_id}（共 {len(pending_rows)} 条待解析）",
+    )
 
-    deadline = time.time() + 900
-    while time.time() < deadline:
-        if output_json_path.is_file() and output_json_path.stat().st_size > 20:
+    row_by_rid = {row["rid"]: row for row in pending_rows}
+    remaining = set(row_by_rid.keys())
+    total_pending = len(pending_rows)
+    deadline = time.time() + max(900, 600 * total_pending)
+
+    def _collect_and_flush() -> None:
+        if not remaining:
+            return
+        # Check direct scripts_out.json first
+        for rid in list(remaining):
+            row = row_by_rid[rid]
+            out_p = row["scripts_out_path"]
+            if out_p.is_file() and out_p.stat().st_size > 20:
+                try:
+                    summary, scripts = parse_scripts_output(out_p, "", script_cols)
+                    if len(scripts) >= script_count:
+                        log(f"Detected scripts_out.json for {rid} ({len(scripts)} scripts) in fixed conv {conv_id}")
+                        on_row_ready(row, summary, scripts)
+                        remaining.discard(rid)
+                except Exception:
+                    pass
+        if not remaining:
+            return
+        extracted_map = _extract_batch_scripts_from_antigravity(conv_id, remaining, total_pending)
+        for rid, raw_obj in extracted_map.items():
+            if rid not in remaining:
+                continue
+            row = row_by_rid[rid]
             try:
-                return parse_scripts_output(output_json_path, "", script_cols)
-            except Exception:
-                pass
-        extracted = _extract_scripts_from_antigravity_transcript(conv_id)
-        if extracted:
-            log(f"Extracted {len(extracted.get('scripts') or [])} scripts from Antigravity conversation {conv_id}!")
-            return parse_scripts_output(output_json_path, "", script_cols, raw_obj=extracted)
+                summary, scripts = parse_scripts_output(row["scripts_out_path"], "", script_cols, raw_obj=raw_obj)
+                if len(scripts) >= script_count:
+                    log(f"Extracted {len(scripts)} scripts for {rid} ({row['product_name']}) from fixed Antigravity conv {conv_id}!")
+                    on_row_ready(row, summary, scripts)
+                    remaining.discard(rid)
+            except Exception as exc:
+                log(f"Waiting for complete JSON on {rid}: {exc}")
+
+    while time.time() < deadline and remaining:
+        _collect_and_flush()
+        if not remaining:
+            return conv_id
         if conv_id:
             try:
                 st = httpx.post(
@@ -588,19 +832,44 @@ def run_antigravity_engine(prompt: str, work_dir: Path, output_json_path: Path, 
                 if st.status_code == 200:
                     run_state = ((st.json().get("conversation") or {}).get("state") or {}).get("runState")
                     if run_state == "RUN_STATE_IDLE":
-                        time.sleep(2)
-                        extracted = _extract_scripts_from_antigravity_transcript(conv_id)
-                        if extracted:
-                            return parse_scripts_output(output_json_path, "", script_cols, raw_obj=extracted)
-                        if output_json_path.is_file():
-                            return parse_scripts_output(output_json_path, "", script_cols)
-                        raise RuntimeError(f"Antigravity 对话 {conv_id} 已结束，但未找到有效脚本 JSON")
+                        time.sleep(3)
+                        _collect_and_flush()
+                        if not remaining:
+                            return conv_id
+                        missing_list = ", ".join(sorted(remaining))
+                        raise RuntimeError(f"Antigravity 固定批次对话 {conv_id} 已结束，但仍有未产出完整脚本的记录：{missing_list}")
             except RuntimeError:
                 raise
             except Exception:
                 pass
         time.sleep(4)
-    raise RuntimeError(f"等待 Antigravity ({conv_id}) 生成脚本超时（15分钟）")
+    if remaining:
+        missing_list = ", ".join(sorted(remaining))
+        raise RuntimeError(f"等待 Antigravity 固定批次对话 ({conv_id}) 生成脚本超时，未完成记录：{missing_list}")
+    return conv_id
+
+
+def run_antigravity_engine(prompt: str, work_dir: Path, output_json_path: Path, script_cols: list[str], title: str) -> tuple[str, list[dict[str, Any]]]:
+    """Single-record backwards-compatible wrapper."""
+    result_box: list[tuple[str, list[dict[str, Any]]]] = []
+    row = {
+        "rid": work_dir.name,
+        "product_name": title,
+        "task_name": title,
+        "video_local": work_dir / "reference_video.mp4",
+        "image_locals": [],
+        "rea_out": work_dir / "rea_out",
+        "scripts_out_path": output_json_path,
+    }
+    run_antigravity_batch_engine(
+        job_id=work_dir.name,
+        pending_rows=[row],
+        analysis_prompt=prompt,
+        script_count=len(script_cols),
+        script_cols=script_cols,
+        on_row_ready=lambda _r, s, sc: result_box.append((s, sc)),
+    )
+    return result_box[0]
 
 
 _TUNNEL = SSHTunnel()
@@ -681,6 +950,40 @@ def process_sync_job(claimed: dict[str, Any]) -> None:
         )
 
         processed = 0
+        pending_rows: list[dict[str, Any]] = []
+
+        def _writeback_row(row: dict[str, Any], summary: str, scripts: list[dict[str, Any]], engine_used: str | None = None) -> None:
+            nonlocal processed
+            rid_w = row["rid"]
+            prod_w = row["product_name"]
+            task_w = row["task_name"]
+            post_progress(
+                job_id,
+                status="writing_feishu",
+                current_record_id=rid_w,
+                current_stage=f"回写 {len(scripts)} 份脚本到飞书「{prod_w}」…",
+                log=f"正在回写飞书列（{rid_w}）：{', '.join(s['column'] for s in scripts)}",
+            )
+            update_fields = {s["column"]: s["text"] for s in scripts}
+            feishu_update_record(api_base, token, app_token, table_id, rid_w, update_fields)
+            video2_post(
+                f"/api/feishu/bridge/sync/{job_id}/record-complete",
+                json_body={
+                    "feishu_record_id": rid_w,
+                    "product_name": prod_w,
+                    "task_name": task_w,
+                    "scripts": scripts,
+                    "analysis_summary": summary,
+                    "engine_used": engine_used or engine,
+                    "sync_status": "written_back",
+                },
+                timeout=30.0,
+                retries=4,
+            )
+            processed += 1
+            post_progress(job_id, processed_records=processed, log=f"已完成行 {rid_w}（{prod_w}），{len(scripts)} 份脚本已回写飞书")
+
+        # Phase 1: Download & upload all media, reuse finished rows, pre-run rea-video decompose
         for rec in records:
             rid = str(rec.get("record_id") or "")
             fdict = rec.get("fields") or {}
@@ -709,12 +1012,12 @@ def process_sync_job(claimed: dict[str, Any]) -> None:
             if video_atts:
                 att = video_atts[0]
                 ext = Path(att["name"]).suffix or ".mp4"
-                video_local = feishu_download_media(api_base, token, att["file_token"], rec_dir / f"reference_video{ext}")
+                video_local = feishu_download_media(api_base, token, att["file_token"], rec_dir / f"reference_video{ext}", expected_size=att.get("size", 0))
 
             image_locals: list[Path] = []
             for idx, att in enumerate(image_atts, start=1):
                 ext = Path(att["name"]).suffix or ".png"
-                img_path = feishu_download_media(api_base, token, att["file_token"], rec_dir / f"ref_img_{idx:02d}{ext}")
+                img_path = feishu_download_media(api_base, token, att["file_token"], rec_dir / f"ref_img_{idx:02d}{ext}", expected_size=att.get("size", 0))
                 image_locals.append(img_path)
 
             # 2. Upload media to vast.ai video_2 so one-click video generation can use them immediately
@@ -769,75 +1072,97 @@ def process_sync_job(claimed: dict[str, Any]) -> None:
                 post_progress(job_id, processed_records=processed, log=f"行 {rid}（{product_name}）缺少参考视频，跳过拆解")
                 continue
 
-            # 4. Run rea-video decompose + selected engine (Antigravity / Codex)
+            # 4. Reuse cached local scripts_out.json if complete (unless force_rerun)
             scripts_out_path = rec_dir / "scripts_out.json"
+            row_info = {
+                "rid": rid,
+                "product_name": product_name,
+                "task_name": task_name,
+                "rec_dir": rec_dir,
+                "video_local": video_local,
+                "image_locals": image_locals,
+                "rea_out": rec_dir / "rea_out",
+                "scripts_out_path": scripts_out_path,
+            }
             if scripts_out_path.is_file() and not force_rerun:
                 try:
                     summary, scripts = parse_scripts_output(scripts_out_path, "", script_cols)
                     if len(scripts) >= script_count:
                         log(f"Reusing cached local {scripts_out_path} ({len(scripts)} scripts) for {rid}")
-                    else:
-                        scripts = []
+                        _writeback_row(row_info, summary, scripts)
+                        continue
                 except Exception:
-                    scripts = []
-            else:
-                scripts = []
+                    pass
 
-            if not scripts:
-                post_progress(
-                    job_id,
-                    status="analyzing",
-                    current_record_id=rid,
-                    current_stage=f"正在用 {engine} + rea-video 解析「{product_name}」并生成 {script_count} 份脚本…",
-                    log=f"启动 rea-video decompose ({video_local.name})",
-                )
-                rea_out = rec_dir / "rea_out"
-                if not (rea_out / "breakdown.json").is_file() or force_rerun:
-                    run_rea_video_decompose(video_local, rea_out)
-                prompt = build_agent_prompt(
-                    video_path=video_local,
-                    image_paths=image_locals,
-                    rea_out_dir=rea_out,
-                    output_json_path=scripts_out_path,
-                    product_name=product_name,
-                    task_name=task_name,
+            # Pre-run rea-video decompose so the single fixed conversation has all assets ready
+            post_progress(
+                job_id,
+                status="analyzing",
+                current_record_id=rid,
+                current_stage=f"正在预拆解「{product_name}」参考视频（rea-video decompose）…",
+                log=f"启动 rea-video decompose ({rid} / {video_local.name})",
+            )
+            rea_out = row_info["rea_out"]
+            if not (rea_out / "breakdown.json").is_file() or force_rerun:
+                run_rea_video_decompose(video_local, rea_out)
+            pending_rows.append(row_info)
+
+        # Phase 2: Generate scripts for ALL pending rows using ONE fixed conversation for this batch
+        if pending_rows:
+            if engine == "antigravity":
+                run_antigravity_batch_engine(
+                    job_id=job_id,
+                    pending_rows=pending_rows,
                     analysis_prompt=analysis_prompt,
                     script_count=script_count,
                     script_cols=script_cols,
-                    engine=engine,
+                    on_row_ready=lambda row, summary, scripts: _writeback_row(row, summary, scripts, engine_used="antigravity"),
                 )
-                if engine == "antigravity":
-                    summary, scripts = run_antigravity_engine(prompt, rec_dir, scripts_out_path, script_cols, f"{product_name}-{task_name}")
-                else:
-                    summary, scripts = run_codex_engine(prompt, rec_dir, scripts_out_path, script_cols)
-
-            # 5. Write generated scripts back to Feishu Bitable columns '脚本1'..'脚本N'
-            post_progress(
-                job_id,
-                status="writing_feishu",
-                current_record_id=rid,
-                current_stage=f"回写 {len(scripts)} 份脚本到飞书「{product_name}」…",
-                log=f"正在回写飞书列：{', '.join(s['column'] for s in scripts)}",
-            )
-            update_fields = {s["column"]: s["text"] for s in scripts}
-            feishu_update_record(api_base, token, app_token, table_id, rid, update_fields)
-
-            video2_post(
-                f"/api/feishu/bridge/sync/{job_id}/record-complete",
-                json_body={
-                    "feishu_record_id": rid,
-                    "product_name": product_name,
-                    "task_name": task_name,
-                    "scripts": scripts,
-                    "analysis_summary": summary,
-                    "engine_used": engine,
-                    "sync_status": "written_back",
-                },
-                timeout=30.0,
-                retries=4,
-            )
-            processed += 1
-            post_progress(job_id, processed_records=processed, log=f"已完成行 {rid}（{product_name}），{len(scripts)} 份脚本已回写飞书")
+            else:
+                batch_codex_thread_id: str | None = None
+                for idx, row in enumerate(pending_rows, start=1):
+                    rid = row["rid"]
+                    product_name = row["product_name"]
+                    task_name = row["task_name"]
+                    stage_note = (
+                        f"复用固定 Codex 会话（{batch_codex_thread_id[:8]}）解析第 {idx}/{len(pending_rows)} 条「{product_name}」…"
+                        if batch_codex_thread_id
+                        else f"启动固定 Codex 会话解析第 {idx}/{len(pending_rows)} 条「{product_name}」…"
+                    )
+                    post_progress(
+                        job_id,
+                        status="analyzing",
+                        current_record_id=rid,
+                        current_stage=stage_note,
+                        log=stage_note,
+                    )
+                    prompt = build_agent_prompt(
+                        video_path=row["video_local"],
+                        image_paths=row["image_locals"],
+                        rea_out_dir=row["rea_out"],
+                        output_json_path=row["scripts_out_path"],
+                        product_name=product_name,
+                        task_name=task_name,
+                        analysis_prompt=analysis_prompt,
+                        script_count=script_count,
+                        script_cols=script_cols,
+                        engine="codex",
+                    )
+                    summary, scripts, new_tid = run_codex_engine(
+                        prompt,
+                        row["rec_dir"],
+                        row["scripts_out_path"],
+                        script_cols,
+                        session_root=sync_root,
+                        thread_id=batch_codex_thread_id,
+                    )
+                    if new_tid and not batch_codex_thread_id:
+                        batch_codex_thread_id = new_tid
+                        post_progress(
+                            job_id,
+                            log=f"本批次固定使用单个 Codex 会话：{batch_codex_thread_id}（共 {len(pending_rows)} 条待解析）",
+                        )
+                    _writeback_row(row, summary, scripts, engine_used="codex")
 
         video2_post(
             f"/api/feishu/bridge/sync/{job_id}/complete",
