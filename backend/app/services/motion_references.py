@@ -85,21 +85,30 @@ def resolve_motion_references(session, settings, shot, values=None):
         if not source.is_file():
             raise AppError(409, "motion_reference_changed", "动作参考原视频缺失，未提交生成")
 
-        # Anti-bleed guardrail: if a multi-shot reference video range is much longer
-        # than this shot, auto-slice to the best matching clean single-shot segment.
+        # When a long project-level reference covers multiple shots, align each
+        # shot to a scene segment before freezing its native H3 video input.
         eff_start = ref.trim_start_seconds
         eff_end = ref.trim_end_seconds
         auto_slice_meta = None
         try:
             from app.services.reference_video_slicer import auto_slice_range_for_shot
+
             project_shots = list(
                 session.scalars(
-                    select(m.StoryboardShot).where(m.StoryboardShot.project_id == shot.project_id).order_by(m.StoryboardShot.order.asc())
+                    select(m.StoryboardShot)
+                    .where(m.StoryboardShot.project_id == shot.project_id)
+                    .order_by(m.StoryboardShot.order.asc())
                 )
             )
-            shot_ids = [s.id for s in project_shots]
-            shot_idx = shot_ids.index(shot.id) if shot.id in shot_ids else max(0, (shot.order or 1) - 1)
-            all_durs = [float(s.duration_seconds or 3.0) for s in project_shots] or [float(shot.duration_seconds or 3.0)]
+            shot_ids = [project_shot.id for project_shot in project_shots]
+            shot_idx = (
+                shot_ids.index(shot.id)
+                if shot.id in shot_ids
+                else max(0, (getattr(shot, "order", None) or 1) - 1)
+            )
+            all_durs = [float(item.duration_seconds or 3.0) for item in project_shots]
+            if not all_durs:
+                all_durs = [float(shot.duration_seconds or 3.0)]
             eff_start, eff_end, auto_slice_meta = auto_slice_range_for_shot(
                 ffmpeg_path=settings.ffmpeg_path,
                 source_path=source,
@@ -114,18 +123,27 @@ def resolve_motion_references(session, settings, shot, values=None):
         except Exception:
             eff_start, eff_end = ref.trim_start_seconds, ref.trim_end_seconds
 
+        if (
+            not math.isfinite(eff_start)
+            or not math.isfinite(eff_end)
+            or eff_start < ref.trim_start_seconds
+            or eff_end > ref.trim_end_seconds
+            or eff_end <= eff_start
+        ):
+            eff_start, eff_end = ref.trim_start_seconds, ref.trim_end_seconds
+            auto_slice_meta = {"strategy": "invalid_slice_fallback_original", "sliced": False}
+
         selected_duration = eff_end - eff_start
         expected_frames = reference_frame_count(selected_duration)
-
-        dumped = ref.model_dump(exclude_none=True)
-        dumped["trim_start_seconds"] = eff_start
-        dumped["trim_end_seconds"] = eff_end
+        resolved_reference = ref.model_dump(exclude_none=True)
+        resolved_reference["trim_start_seconds"] = eff_start
+        resolved_reference["trim_end_seconds"] = eff_end
         if auto_slice_meta and auto_slice_meta.get("sliced"):
-            dumped["auto_slice"] = auto_slice_meta
+            resolved_reference["auto_slice"] = auto_slice_meta
 
         result.append(
             {
-                **dumped,
+                **resolved_reference,
                 "relative_path": video.relative_path,
                 "absolute_path": str(source),
                 "selected_duration_seconds": selected_duration,

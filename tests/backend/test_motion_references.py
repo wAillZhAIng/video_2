@@ -182,6 +182,45 @@ def test_native_reference_long_selections_preserve_the_full_selected_range(setti
         engine.dispose()
 
 
+def test_motion_reference_freezes_auto_sliced_range_for_project_shot(settings, monkeypatch):
+    import app.services.reference_video_slicer as slicer
+
+    media = Path(settings.media_root); media.mkdir(parents=True, exist_ok=True)
+    source = media / 'multi-shot-reference.mp4'; source.write_bytes(b'multi-shot-reference')
+    sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    engine = build_engine(settings.database_url); Base.metadata.create_all(engine)
+    monkeypatch.setattr(slicer, 'auto_slice_range_for_shot', lambda **kwargs: (
+        7.0, 9.0, {'strategy': 'ffmpeg_scene_cut_aligned', 'sliced': True,
+                    'original_range': [0.0, 18.0], 'sliced_range': [7.0, 9.0]},
+    ))
+    try:
+        with build_session_factory(engine)() as session:
+            session.add(m.Project(id='auto-slice-project', name='auto-slice reference scope'))
+            session.flush()
+            first = m.StoryboardShot(id='auto-slice-first', project_id='auto-slice-project', order=1,
+                                     duration_seconds=3)
+            selected = m.StoryboardShot(id='auto-slice-selected', project_id='auto-slice-project', order=2,
+                                        duration_seconds=3)
+            session.add_all([first, selected])
+            session.add(m.ReferenceVideo(id='auto-slice-video', name='reference', filename=source.name,
+                relative_path=source.name, sha256=sha, metadata_json={'duration_seconds': 18},
+                state='active', revision=1))
+            session.flush()
+            session.add(m.ProjectReferenceVideo(project_id='auto-slice-project', video_id='auto-slice-video'))
+            session.flush()
+            resolved = resolve_motion_references(session, settings, selected, [{
+                'video_id': 'auto-slice-video', 'expected_revision': 1, 'source_sha256': sha,
+                'trim_start_seconds': 0, 'trim_end_seconds': 18, 'authorized_for_reference': True,
+            }])[0]
+
+            assert (resolved['trim_start_seconds'], resolved['trim_end_seconds']) == (7, 9)
+            assert resolved['selected_duration_seconds'] == 2
+            assert resolved['effective_frames'] == 48
+            assert resolved['auto_slice']['original_range'] == [0.0, 18.0]
+    finally:
+        engine.dispose()
+
+
 def test_preprocess_long_reference_preserves_its_full_selected_range(settings, tmp_path):
     import app.services.motion_references as motion
     from app.core.config import Settings

@@ -10,10 +10,11 @@ import json
 import math
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
-_CACHE_DIR = Path("/tmp/vf_scene_cut_cache")
+_CACHE_DIR = Path(tempfile.gettempdir()) / "vf_scene_cut_cache"
 _MEMORY_CACHE: dict[str, list[tuple[float, float]]] = {}
 _PTS_RE = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 
@@ -61,13 +62,18 @@ def detect_video_shots(
     if cache_key in _MEMORY_CACHE:
         return list(_MEMORY_CACHE[cache_key])
 
-    cache_file = _CACHE_DIR / f"{sha256}.json"
+    cache_file = _CACHE_DIR / f"{sha256}-{round(source_duration, 3)}.json"
     try:
         if cache_file.is_file():
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
             if isinstance(cached, list) and cached:
-                parsed = [(float(a), float(b)) for a, b in cached if float(b) > float(a)]
-                if parsed:
+                parsed = [(float(a), float(b)) for a, b in cached]
+                if all(
+                    math.isfinite(start)
+                    and math.isfinite(end)
+                    and 0 <= start < end <= source_duration + 0.01
+                    for start, end in parsed
+                ):
                     _MEMORY_CACHE[cache_key] = parsed
                     return list(parsed)
     except Exception:
@@ -99,6 +105,8 @@ def detect_video_shots(
             timeout=DETECT_TIMEOUT_SECONDS,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+        if proc.returncode != 0:
+            return fallback
         cuts = [float(m.group(1)) for m in _PTS_RE.finditer(proc.stderr or "")]
         segments = _merge_short_segments(cuts, source_duration)
         if not segments:
@@ -153,7 +161,7 @@ def auto_slice_range_for_shot(
 ) -> tuple[float, float, dict[str, Any]]:
     """Auto-slice a multi-shot reference range to one clean segment for this shot.
 
-    - Preserves manually trimmed single-shot ranges untouched.
+    - Leaves short ranges and single-shot projects untouched.
     - Guarantees valid [new_start, new_end] within [trim_start, trim_end].
     - Never raises.
     """
