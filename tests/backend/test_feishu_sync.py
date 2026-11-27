@@ -191,3 +191,32 @@ def test_feishu_service_sync_generate_and_download_flow(tmp_path: Path, monkeypa
             assert arch.status_code == 200 and arch.json()["status"] == "archived"
     finally:
         engine.dispose()
+
+
+def test_approval_request_and_final_video_path_resolution(client):
+    from app import models as m
+    from app.schemas import ApprovalRequest
+    from app.services.feishu_orchestrator import _resolve_project_final_video_path
+
+    # Regression: ApprovalRequest forbids extra fields like reviewer/comment
+    req = ApprovalRequest(operator="feishu_batch", reason="飞书一键生成自动审核")
+    assert req.operator == "feishu_batch"
+
+    with client.app.state.session_factory() as session:
+        proj = m.Project(name="feishu_final_resolve_test", source_type="text", source_text="test", status="draft")
+        session.add(proj)
+        session.flush()
+        asm = m.Assembly(project_id=proj.id, name="自动成片", timeline_json={})
+        session.add(asm)
+        session.flush()
+        render = m.AssemblyRender(
+            assembly_id=asm.id,
+            version=1,
+            kind="render",
+            status="generated",
+            relative_path="assemblies/test_final.mp4",
+            snapshot_json={},
+        )
+        session.add(render)
+        session.commit()
+        assert _resolve_project_final_video_path(session, proj.id) == "assemblies/test_final.mp4"

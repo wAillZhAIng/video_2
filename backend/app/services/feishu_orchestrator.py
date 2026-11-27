@@ -875,7 +875,7 @@ def _prepare_and_start_queue_item(session: Session, settings, batch: FeishuGener
 
     # Approve script & all shots
     now = utcnow()
-    approval_payload = ApprovalRequest(reviewer="feishu_batch", comment="飞书一键生成自动审核")
+    approval_payload = ApprovalRequest(operator="feishu_batch", reason="飞书一键生成自动审核")
     script.status = "approved"
     script.approved_at = now
     approve_record(session, "script", script.id, script.revision, "approved", approval_payload)
@@ -907,11 +907,16 @@ def _prepare_and_start_queue_item(session: Session, settings, batch: FeishuGener
     session.commit()
 
 
-def _resolve_project_final_video_path(session: Session, project_id: str) -> str | None:
+def _resolve_project_final_video_path(session: Session, project_id: str, studio_run_id: str | None = None) -> str | None:
+    if studio_run_id:
+        run = session.get(m.StudioRun, studio_run_id)
+        rel = (run.result_json or {}).get("relative_path") if run else None
+        if rel:
+            return str(rel)
     render = session.scalar(
         select(m.AssemblyRender)
         .join(m.Assembly, m.Assembly.id == m.AssemblyRender.assembly_id)
-        .where(m.Assembly.project_id == project_id, m.AssemblyRender.status == "succeeded")
+        .where(m.Assembly.project_id == project_id, m.AssemblyRender.status.in_(["generated", "succeeded"]))
         .order_by(m.AssemblyRender.created_at.desc())
         .limit(1)
     )
@@ -946,7 +951,7 @@ def advance_feishu_queue_once(session: Session, settings) -> bool:
             changed = True
             continue
         if run.status == "completed":
-            item.output_relative_path = _resolve_project_final_video_path(session, item.project_id) if item.project_id else None
+            item.output_relative_path = _resolve_project_final_video_path(session, item.project_id, item.studio_run_id) if item.project_id else None
             item.status = "completed"
             item.finished_at = utcnow()
             changed = True
