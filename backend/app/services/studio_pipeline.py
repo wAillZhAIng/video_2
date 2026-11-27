@@ -760,7 +760,10 @@ def _quality(session,settings,run,entry):
     elif item.status=='generated':
         video=get(session,m.VideoRevision,item.video_id);_valid_video(session,settings,video)
         entry.update(status='succeeded',video_id=video.id,error=None)
-    elif item.status in {'failed','cancelled'}:_failure(entry,'quality_processing_failed',item.error_message or '视频后处理失败，原视频保留')
+    elif item.status in {'failed','cancelled'}:
+        msg=item.error_message or '视频后处理失败，原视频保留'
+        transient_q=item.status=='failed' and any(k in msg.lower() for k in ('timed out','timeoutexpired','timeout'))
+        _failure(entry,'quality_processing_failed',msg,transient=transient_q,max_retries=run.snapshot_json.get('options',{}).get('max_retries',2))
     elif item.status=='unknown':_failure(entry,'quality_processing_unknown',item.error_message or '画质处理提交结果未知；未重新派发',unknown=True)
     else:
         message=item.error_message if item.status=='queued' else None

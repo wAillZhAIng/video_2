@@ -391,11 +391,20 @@ def run_render(settings, factory, identifier,gpu_release_evidence=None):
             sr_paths=snapshot['super_resolution']['runtime'];receipt_path=destination.with_suffix('.sr.json')
             if hashlib.sha256(Path(sr_paths['model']).read_bytes()).hexdigest()!=snapshot['super_resolution']['model_sha256']:raise AppError(409,'super_resolution_model_changed','超分模型文件变化，未继续处理')
             if hashlib.sha256(Path(sr_paths['script']).read_bytes()).hexdigest()!=snapshot['super_resolution']['script_sha256']:raise AppError(409,'super_resolution_script_changed','超分执行程序变化，需重新冻结输入')
+            sr_threads=str(min(16,max(4,(os.cpu_count() or 8)//2)))
             command=[sr_paths['python'],sr_paths['script'],'--input',str(source),'--output',str(destination),'--model',sr_paths['model'],
                 '--width',str(target['width']),'--height',str(target['height']),'--ffmpeg',settings.ffmpeg_path,'--ffprobe',settings.ffprobe_path,'--receipt',str(receipt_path),
-                '--crf',str(enc['crf']),'--preset',enc['preset']]
+                '--crf',str(enc['crf']),'--preset',enc['preset'],'--threads',sr_threads,'--timeout','1800']
         process=subprocess.run(command,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=3600,shell=False,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-        if process.returncode:raise AppError(502,'quality_encoding_failed','真实FFmpeg处理失败：'+process.stderr[-1800:])
+        if process.returncode:
+            detail=process.stderr[-1800:]
+            if snapshot.get('ai_super_resolution') and not is_seed and receipt_path.is_file():
+                try:
+                    rec_err=json.loads(receipt_path.read_text('utf-8'))
+                    if rec_err.get('error'):
+                        detail=f"{rec_err.get('error_type','Error')}: {rec_err['error']}"[:1800]
+                except Exception:pass
+            raise AppError(502,'quality_encoding_failed','真实FFmpeg处理失败：'+detail)
         if snapshot.get('ai_super_resolution') and not is_seed:
             sr_receipt=json.loads(receipt_path.read_text('utf-8'))
             if sr_receipt.get('model_sha256')!=snapshot['super_resolution']['model_sha256'] or sr_receipt.get('frames_processed')!=original['frames']:
