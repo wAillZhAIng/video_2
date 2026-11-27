@@ -81,15 +81,51 @@ def resolve_motion_references(session, settings, shot, values=None):
         ):
             raise AppError(422, "motion_reference_range", "所选片段超出原视频时长")
 
-        selected_duration = ref.trim_end_seconds - ref.trim_start_seconds
-        expected_frames = reference_frame_count(selected_duration)
         source = safe_media_path(settings.media_root, video.relative_path, must_exist=True)
         if not source.is_file():
             raise AppError(409, "motion_reference_changed", "动作参考原视频缺失，未提交生成")
 
+        # Anti-bleed guardrail: if a multi-shot reference video range is much longer
+        # than this shot, auto-slice to the best matching clean single-shot segment.
+        eff_start = ref.trim_start_seconds
+        eff_end = ref.trim_end_seconds
+        auto_slice_meta = None
+        try:
+            from app.services.reference_video_slicer import auto_slice_range_for_shot
+            project_shots = list(
+                session.scalars(
+                    select(m.StoryboardShot).where(m.StoryboardShot.project_id == shot.project_id).order_by(m.StoryboardShot.order.asc())
+                )
+            )
+            shot_ids = [s.id for s in project_shots]
+            shot_idx = shot_ids.index(shot.id) if shot.id in shot_ids else max(0, (shot.order or 1) - 1)
+            all_durs = [float(s.duration_seconds or 3.0) for s in project_shots] or [float(shot.duration_seconds or 3.0)]
+            eff_start, eff_end, auto_slice_meta = auto_slice_range_for_shot(
+                ffmpeg_path=settings.ffmpeg_path,
+                source_path=source,
+                source_duration=source_duration,
+                sha256=video.sha256,
+                trim_start=eff_start,
+                trim_end=eff_end,
+                shot_index=shot_idx,
+                shot_duration=float(shot.duration_seconds or 3.0),
+                all_shot_durations=all_durs,
+            )
+        except Exception:
+            eff_start, eff_end = ref.trim_start_seconds, ref.trim_end_seconds
+
+        selected_duration = eff_end - eff_start
+        expected_frames = reference_frame_count(selected_duration)
+
+        dumped = ref.model_dump(exclude_none=True)
+        dumped["trim_start_seconds"] = eff_start
+        dumped["trim_end_seconds"] = eff_end
+        if auto_slice_meta and auto_slice_meta.get("sliced"):
+            dumped["auto_slice"] = auto_slice_meta
+
         result.append(
             {
-                **ref.model_dump(exclude_none=True),
+                **dumped,
                 "relative_path": video.relative_path,
                 "absolute_path": str(source),
                 "selected_duration_seconds": selected_duration,

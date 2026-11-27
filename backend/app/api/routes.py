@@ -1386,10 +1386,10 @@ def reconcile_job(request: Request, job_id: str, session: Session = Depends(get_
 def resolve_unknown_local_job(job_id: str, payload: ResolveUnknownLocalGeneration, session: Session = Depends(get_db)):
     """Record explicit human review, never infer the lost provider outcome."""
     job=required(session,GenerationJob,job_id,'任务')
-    if job.status!='unknown' or job.provider!='comfyui_h3' or job.provider_job_id is not None:
-        raise AppError(409,'unknown_resolution_unavailable','仅可人工处理未取得 ComfyUI 任务 ID 的未知任务')
+    if job.status!='unknown' or job.provider!='comfyui_h3':
+        raise AppError(409,'unknown_resolution_unavailable','仅可人工处理本机 ComfyUI 的未知任务')
     result=session.execute(update(GenerationJob).where(GenerationJob.id==job_id,GenerationJob.status=='unknown',
-        GenerationJob.provider=='comfyui_h3',GenerationJob.provider_job_id.is_(None)).values(
+        GenerationJob.provider=='comfyui_h3').values(
             status='closed_unknown',error_code='operator_closed_unknown',
             error_message='用户已记录人工核对与重复生成风险；原任务结果仍未知，系统未重发或删除输出',
             finished_at=datetime.now(timezone.utc)))

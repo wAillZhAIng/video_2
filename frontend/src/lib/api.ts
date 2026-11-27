@@ -376,7 +376,7 @@ export const api = {
     normalizeProviderHealth(unwrap<ProviderHealth>(await request("/api/providers/h3/health", { signal }))),
 
   getContextProviderHealth: async (signal?: AbortSignal) =>
-    normalizeProviderHealth(unwrap<ProviderHealth>(await request("/api/providers/h3/context-health", { signal }))),
+    normalizeProviderHealth(unwrap<ProviderHealth>(await request("/api/providers/h3/health", { signal }))),
 
   getProviderCapabilities: async (signal?: AbortSignal) =>
     normalizeCapabilities(unwrap<ProviderCapabilities>(await request("/api/providers/h3/capabilities", { signal }))),

@@ -403,9 +403,9 @@ async def process_video_tick(settings: Settings, session_factory):
                 if job.provider == 'comfyui_h3' and job.provider_job_id:
                     attempts, expired = _record_comfy_poll_failure(job_id, error)
                     if expired:
-                        job.status='unknown'
-                        job.error_code='provider_result_unavailable'
-                        job.error_message='本地 ComfyUI 状态或结果连续不可用；原任务 ID 已保留，可重新核查原任务，未重复提交生成'
+                        job.status='failed'
+                        job.error_code='comfyui_interrupted_retryable'
+                        job.error_message='本地 ComfyUI 重启或连接中断导致原任务丢失，已标记为可自动重试'
                         job.finished_at=datetime.now(timezone.utc)
                         session.add(AuditEvent(object_type='generation_job', object_id=job.id,
                             action='provider_result_unavailable', details_json={

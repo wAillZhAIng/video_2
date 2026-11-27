@@ -372,7 +372,15 @@ def retry(project_id: str, payload: dict | None = None, session: Session = Depen
     selected = [n for n in nodes if (targets is None or n['id'] in targets) and n['status'] in {'exception', 'failed', 'unknown'}]
     if targets is not None and {n['id'] for n in selected} != targets:
         raise AppError(409, 'studio_retry_scope', '指定节点中有节点已经恢复或不在本轮失败列表')
-    if any(n['status'] == 'unknown' for n in selected):
+    unresolved_unknown = []
+    for n in selected:
+        if n['status'] == 'unknown':
+            job_id = n.get('child_id') or n.get('job_id') or n.get('external_id') or n.get('ref_id')
+            from app.models import GenerationJob as _GJ
+            job_row = session.get(_GJ, job_id) if job_id else None
+            if not (job_row and job_row.status in {'closed_unknown', 'failed'}):
+                unresolved_unknown.append(n['id'])
+    if unresolved_unknown:
         raise AppError(409, 'studio_unknown_not_retryable', '含结果未知的请求；请先核对原服务任务，系统未重复提交以避免重复费用')
     # A retry must keep its frozen service and native reference inputs.  For
     # historical runs that have no frozen route, refresh only local metadata
