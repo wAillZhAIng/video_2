@@ -1,5 +1,6 @@
 """Measured full-video processing. Lanczos is ordinary scaling, never AI super-resolution."""
 from __future__ import annotations
+import os
 import asyncio
 import copy
 import hashlib
