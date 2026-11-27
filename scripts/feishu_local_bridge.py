@@ -603,9 +603,48 @@ def run_antigravity_engine(prompt: str, work_dir: Path, output_json_path: Path, 
     raise RuntimeError(f"等待 Antigravity ({conv_id}) 生成脚本超时（15分钟）")
 
 
+_TUNNEL = SSHTunnel()
+
+
+def video2_post(
+    path: str,
+    *,
+    json_body: Any = None,
+    data: dict[str, Any] | None = None,
+    file_specs: list[tuple[str, Path, str]] | None = None,
+    timeout: float = 60.0,
+    retries: int = 4,
+) -> httpx.Response:
+    url = f"{VIDEO2_API_URL}{path}"
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        opened_handles = []
+        try:
+            multipart_files = None
+            if file_specs is not None:
+                multipart_files = []
+                for field_name, file_path, mime in file_specs:
+                    fh = file_path.open("rb")
+                    opened_handles.append(fh)
+                    multipart_files.append((field_name, (file_path.name, fh, mime)))
+            return httpx.post(url, json=json_body, data=data, files=multipart_files, timeout=timeout)
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.WriteError, httpx.TimeoutException) as exc:
+            last_exc = exc
+            log(f"video_2 POST {path} attempt {attempt}/{retries} hit {type(exc).__name__}; ensuring SSH tunnel...")
+            _TUNNEL.ensure()
+            time.sleep(min(2 * attempt, 6))
+        finally:
+            for fh in opened_handles:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+    raise RuntimeError(f"连接 video_2 失败 ({path}): {last_exc}")
+
+
 def post_progress(job_id: str, **kwargs: Any) -> None:
     try:
-        httpx.post(f"{VIDEO2_API_URL}/api/feishu/bridge/sync/{job_id}/progress", json=kwargs, timeout=15.0)
+        video2_post(f"/api/feishu/bridge/sync/{job_id}/progress", json_body=kwargs, timeout=15.0, retries=3)
     except Exception as exc:
         log(f"Progress update warning: {exc}")
 
@@ -679,34 +718,26 @@ def process_sync_job(claimed: dict[str, Any]) -> None:
                 image_locals.append(img_path)
 
             # 2. Upload media to vast.ai video_2 so one-click video generation can use them immediately
-            multipart_files = []
-            opened_handles = []
-            try:
-                if video_local and video_local.is_file():
-                    fh = video_local.open("rb")
-                    opened_handles.append(fh)
-                    multipart_files.append(("video", (video_local.name, fh, "video/mp4")))
-                for img_p in image_locals:
-                    fh = img_p.open("rb")
-                    opened_handles.append(fh)
-                    multipart_files.append(("images", (img_p.name, fh, "application/octet-stream")))
-                up_resp = httpx.post(
-                    f"{VIDEO2_API_URL}/api/feishu/bridge/sync/{job_id}/upload-media",
-                    data={
-                        "feishu_record_id": rid,
-                        "product_name": product_name,
-                        "task_name": task_name,
-                        "local_video_path": str(video_local) if video_local else "",
-                        "local_image_paths_json": json.dumps([str(p) for p in image_locals], ensure_ascii=False),
-                    },
-                    files=multipart_files,
-                    timeout=300.0,
-                )
-                if up_resp.status_code != 200:
-                    raise RuntimeError(f"上传素材到 video_2 失败: HTTP {up_resp.status_code} {up_resp.text[:300]}")
-            finally:
-                for fh in opened_handles:
-                    fh.close()
+            file_specs: list[tuple[str, Path, str]] = []
+            if video_local and video_local.is_file():
+                file_specs.append(("video", video_local, "video/mp4"))
+            for img_p in image_locals:
+                file_specs.append(("images", img_p, "application/octet-stream"))
+            up_resp = video2_post(
+                f"/api/feishu/bridge/sync/{job_id}/upload-media",
+                data={
+                    "feishu_record_id": rid,
+                    "product_name": product_name,
+                    "task_name": task_name,
+                    "local_video_path": str(video_local) if video_local else "",
+                    "local_image_paths_json": json.dumps([str(p) for p in image_locals], ensure_ascii=False),
+                },
+                file_specs=file_specs,
+                timeout=300.0,
+                retries=4,
+            )
+            if up_resp.status_code != 200:
+                raise RuntimeError(f"上传素材到 video_2 失败: HTTP {up_resp.status_code} {up_resp.text[:300]}")
 
             # 3. Check existing scripts in Feishu
             existing_scripts = []
@@ -716,9 +747,9 @@ def process_sync_job(claimed: dict[str, Any]) -> None:
                     existing_scripts.append({"index": idx, "column": col, "text": txt})
 
             if len(existing_scripts) >= script_count and not force_rerun:
-                httpx.post(
-                    f"{VIDEO2_API_URL}/api/feishu/bridge/sync/{job_id}/record-complete",
-                    json={
+                video2_post(
+                    f"/api/feishu/bridge/sync/{job_id}/record-complete",
+                    json_body={
                         "feishu_record_id": rid,
                         "product_name": product_name,
                         "task_name": task_name,
@@ -727,6 +758,7 @@ def process_sync_job(claimed: dict[str, Any]) -> None:
                         "sync_status": "written_back",
                     },
                     timeout=30.0,
+                    retries=4,
                 )
                 processed += 1
                 post_progress(job_id, processed_records=processed, log=f"行 {rid}（{product_name}）飞书已有 {len(existing_scripts)} 份脚本，已复用")
@@ -790,9 +822,9 @@ def process_sync_job(claimed: dict[str, Any]) -> None:
             update_fields = {s["column"]: s["text"] for s in scripts}
             feishu_update_record(api_base, token, app_token, table_id, rid, update_fields)
 
-            httpx.post(
-                f"{VIDEO2_API_URL}/api/feishu/bridge/sync/{job_id}/record-complete",
-                json={
+            video2_post(
+                f"/api/feishu/bridge/sync/{job_id}/record-complete",
+                json_body={
                     "feishu_record_id": rid,
                     "product_name": product_name,
                     "task_name": task_name,
@@ -802,22 +834,28 @@ def process_sync_job(claimed: dict[str, Any]) -> None:
                     "sync_status": "written_back",
                 },
                 timeout=30.0,
+                retries=4,
             )
             processed += 1
             post_progress(job_id, processed_records=processed, log=f"已完成行 {rid}（{product_name}），{len(scripts)} 份脚本已回写飞书")
 
-        httpx.post(
-            f"{VIDEO2_API_URL}/api/feishu/bridge/sync/{job_id}/complete",
-            json={"ok": True, "processed_records": processed, "total_records": len(records), "log": f"同步全部完成，共处理 {processed} 条记录"},
+        video2_post(
+            f"/api/feishu/bridge/sync/{job_id}/complete",
+            json_body={"ok": True, "processed_records": processed, "total_records": len(records), "log": f"同步全部完成，共处理 {processed} 条记录"},
             timeout=30.0,
+            retries=4,
         )
     except Exception as exc:
         log(f"Sync job {job_id} error: {exc}")
-        httpx.post(
-            f"{VIDEO2_API_URL}/api/feishu/bridge/sync/{job_id}/complete",
-            json={"ok": False, "error_message": str(exc)[:1000], "log": f"错误：{exc}"},
-            timeout=30.0,
-        )
+        try:
+            video2_post(
+                f"/api/feishu/bridge/sync/{job_id}/complete",
+                json_body={"ok": False, "error_message": str(exc)[:1000], "log": f"错误：{exc}"},
+                timeout=30.0,
+                retries=4,
+            )
+        except Exception as report_exc:
+            log(f"Failed reporting sync error for {job_id}: {report_exc}")
 
 
 def process_download_batch(manifest: dict[str, Any]) -> None:
@@ -916,7 +954,7 @@ def start_heartbeat_thread() -> None:
 def main() -> None:
     SYNC_DIR_DEFAULT.mkdir(parents=True, exist_ok=True)
     ARCHIVE_DIR_DEFAULT.mkdir(parents=True, exist_ok=True)
-    tunnel = SSHTunnel()
+    tunnel = _TUNNEL
     log(f"video2_bridge starting | api={VIDEO2_API_URL} | sync_dir={SYNC_DIR_DEFAULT} | archive_dir={ARCHIVE_DIR_DEFAULT}")
     log(f"Detected tools: codex={find_codex_exe()} | rea-video={find_rea_video_exe()} | antigravity_ready={check_antigravity_reachable()}")
     start_heartbeat_thread()
