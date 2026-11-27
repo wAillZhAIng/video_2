@@ -23,6 +23,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -900,23 +901,31 @@ def send_heartbeat() -> None:
     httpx.post(f"{VIDEO2_API_URL}/api/feishu/bridge/heartbeat", json=payload, timeout=5.0)
 
 
+def start_heartbeat_thread() -> None:
+    def _loop() -> None:
+        while True:
+            try:
+                send_heartbeat()
+            except Exception:
+                pass
+            time.sleep(15)
+
+    threading.Thread(target=_loop, name="feishu-bridge-heartbeat", daemon=True).start()
+
+
 def main() -> None:
     SYNC_DIR_DEFAULT.mkdir(parents=True, exist_ok=True)
     ARCHIVE_DIR_DEFAULT.mkdir(parents=True, exist_ok=True)
     tunnel = SSHTunnel()
     log(f"video2_bridge starting | api={VIDEO2_API_URL} | sync_dir={SYNC_DIR_DEFAULT} | archive_dir={ARCHIVE_DIR_DEFAULT}")
     log(f"Detected tools: codex={find_codex_exe()} | rea-video={find_rea_video_exe()} | antigravity_ready={check_antigravity_reachable()}")
+    start_heartbeat_thread()
 
-    last_hb = 0.0
     while True:
         try:
             if not tunnel.ensure():
                 time.sleep(5)
                 continue
-            now = time.time()
-            if now - last_hb >= 15:
-                send_heartbeat()
-                last_hb = now
 
             # 1. Claim Feishu sync jobs
             r_sync = httpx.post(f"{VIDEO2_API_URL}/api/feishu/bridge/claim-sync", timeout=15.0)
