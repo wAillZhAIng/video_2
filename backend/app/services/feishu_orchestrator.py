@@ -454,8 +454,11 @@ def ingest_record_media(
                 ProductCreate(name=rec.product_name[:120], category="feishu_sync", notes=f"飞书同步自动建档 ({feishu_record_id})"),
             )
             product = session.get(m.Product, product_dto["id"])
-        rec.product_id = product.id
-        existing_imgs = list(session.scalars(select(m.ProductImage).where(m.ProductImage.product_id == product.id)))
+        rec_id = rec.id
+        product_id = product.id
+        rec.product_id = product_id
+        session.commit()
+        existing_imgs = list(session.scalars(select(m.ProductImage).where(m.ProductImage.product_id == product_id)))
         by_sha = {}
         for img in existing_imgs:
             asset = session.get(m.ScreenplayInputAsset, img.asset_id) if img.asset_id else None
@@ -471,11 +474,13 @@ def ingest_record_media(
                 image_ids.append(by_sha[sha])
             else:
                 purpose = "front" if idx == 0 else "detail"
-                created = pl_service.add_image(session, settings, product.id, fname, data, purpose=purpose, notes=f"飞书参考图 #{idx+1}")
-                img_id = created["id"] if isinstance(created, dict) else created.id
+                created = pl_service.add_image(session, settings, product_id, fname, data, purpose=purpose, notes=f"飞书参考图 #{idx+1}")
+                created_obj = created[0] if isinstance(created, tuple) else created
+                img_id = created_obj["id"] if isinstance(created_obj, dict) else created_obj.id
                 by_sha[sha] = img_id
                 image_ids.append(img_id)
-        if image_ids:
+        rec = session.get(FeishuSyncRecord, rec_id)
+        if image_ids and rec is not None:
             rec.product_image_ids_json = list(dict.fromkeys(image_ids))
 
     rec.sync_status = "media_synced"

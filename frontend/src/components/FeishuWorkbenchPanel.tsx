@@ -58,7 +58,7 @@ const batchStatusLabels: Record<string, string> = {
 };
 
 export function FeishuWorkbenchPanel({
-  mode,
+  mode: initialMode,
   onClose,
   onProjectsChanged,
 }: {
@@ -66,6 +66,8 @@ export function FeishuWorkbenchPanel({
   onClose: () => void;
   onProjectsChanged?: () => void;
 }) {
+  const [mode, setMode] = useState<'sync' | 'generate'>(initialMode);
+  useEffect(() => { setMode(initialMode); }, [initialMode]);
   const [status, setStatus] = useState<FeishuStatusPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -237,6 +239,10 @@ export function FeishuWorkbenchPanel({
           <h2>{mode === 'sync' ? '一键同步飞书（rea-video 解析并回写脚本列）' : '一键生成视频（自动入队 & 按产品归档至 E:\\vast视频）'}</h2>
         </div>
         <div className="toolbar">
+          <div className="segmented">
+            <button type="button" className={mode === 'generate' ? 'active' : ''} onClick={() => setMode('generate')}>一键生成视频</button>
+            <button type="button" className={mode === 'sync' ? 'active' : ''} onClick={() => setMode('sync')}>同步飞书与脚本拆解</button>
+          </div>
           <Badge tone={bridge?.online ? 'success' : 'warning'}>
             {bridge?.online ? `本机桥接在线 (${bridge.hostname || 'Windows'})` : '本机桥接未连接'}
           </Badge>

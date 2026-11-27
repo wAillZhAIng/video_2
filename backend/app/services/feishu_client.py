@@ -97,26 +97,28 @@ def extract_attachments(value: Any) -> list[dict[str, Any]]:
 
 
 def resolve_column_names(fields: list[dict[str, Any]], mapping: dict[str, str]) -> dict[str, str]:
-    """Match configured column names against real Bitable field names with positional fallback."""
+    """Match configured column names against real Bitable field names without binding attachments to text cols."""
     names = [str(f.get("field_name") or "").strip() for f in fields if f.get("field_name")]
     name_set = set(names)
+    text_names = [str(f.get("field_name") or "").strip() for f in fields if f.get("field_name") and f.get("type") != 17]
+    att_names = [str(f.get("field_name") or "").strip() for f in fields if f.get("field_name") and f.get("type") == 17]
 
-    def _pick(configured: str, fallback_idx: int, hints: tuple[str, ...] = ()) -> str:
+    def _pick(configured: str, pool: list[str], fallback_idx: int, hints: tuple[str, ...] = ()) -> str:
         c = (configured or "").strip()
-        if c and c in name_set:
+        if c and c in name_set and (not pool or c in pool):
             return c
-        for n in names:
+        for n in (pool or names):
             if any(h in n for h in hints):
                 return n
-        if 0 <= fallback_idx < len(names):
-            return names[fallback_idx]
-        return c
+        if 0 <= fallback_idx < len(pool):
+            return pool[fallback_idx]
+        return ""
 
     return {
-        "col_product_name": _pick(mapping.get("col_product_name", "产品名称"), 0, ("产品名称", "产品", "商品")),
-        "col_reference_video": _pick(mapping.get("col_reference_video", "参考视频"), 1, ("参考视频", "视频")),
-        "col_reference_image": _pick(mapping.get("col_reference_image", "参考图"), 2, ("参考图", "图片", "产品图")),
-        "col_task_name": _pick(mapping.get("col_task_name", "任务名称"), 3, ("任务名称", "任务", "名称", "标题")),
+        "col_product_name": _pick(mapping.get("col_product_name", "产品名称"), text_names, 0, ("产品名称", "产品", "商品")),
+        "col_reference_video": _pick(mapping.get("col_reference_video", "参考视频"), att_names or names, 0, ("参考视频", "视频")),
+        "col_reference_image": _pick(mapping.get("col_reference_image", "参考图"), att_names or names, 1, ("参考图", "图片", "产品图")),
+        "col_task_name": _pick(mapping.get("col_task_name", "任务名称"), text_names, -1, ("任务名称", "任务", "标题")),
         "col_script_start": (mapping.get("col_script_start") or "脚本1").strip(),
     }
 
