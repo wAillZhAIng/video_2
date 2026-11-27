@@ -10,8 +10,8 @@ TaskSlot = Literal['script_planning','character_image','keyframe_image','video_g
     'motion_driving','dialogue_generation','lip_sync','video_upscale','quality_check','final_assembly',
     'screenplay_from_text','screenplay_from_image','screenplay_from_video']
 ServiceModule = Literal['language_processing','character_generation','video_generation','final_assembly',
-    'dialogue_generation','lip_sync','video_upscale','quality_check','speech_recognition','background_music']
-ServiceProvider = Literal['comfyui','openai_compatible','video_api','ffmpeg','local_runtime','local_llm','openai_tts','cloud_draft','local_asr']
+    'dialogue_generation','lip_sync','video_upscale','quality_check','speech_recognition','background_music','feishu_sync']
+ServiceProvider = Literal['comfyui','openai_compatible','video_api','ffmpeg','local_runtime','local_llm','openai_tts','cloud_draft','local_asr','feishu_bitable']
 RouteMode = Literal['local_only','cloud_only','local_first','cloud_first','manual','auto']
 RouteScope = Literal['system','project','shot']
 TaskState = Literal['queued','running','succeeded','failed','unknown','cancelled','blocked','skipped']

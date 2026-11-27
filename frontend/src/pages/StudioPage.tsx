@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ArrowRight, FileUp, RefreshCw, Plus, Play, Pause, FolderOpen, Wrench, Download } from 'lucide-react';
+import { ArrowRight, FileUp, RefreshCw, Plus, Play, Pause, FolderOpen, Wrench, Download, Sparkles, Clapperboard } from 'lucide-react';
+import { FeishuWorkbenchPanel } from '../components/FeishuWorkbenchPanel';
 import { ApiError, api, MODEL_CONNECTIONS_RECHECKED, request } from '../lib/api';
 import type { PipelineStart, StudioOverview } from '../lib/studio-contract';
 import { PageHeader, EmptyState, LoadingState, FormField } from '../components/ui';
@@ -43,6 +44,7 @@ export function StudioPage() {
   },[hash,loadedProjectId,projectId]);
   const quality=useQualityProfile(projectId?'project':'system',projectId||'default');
   const [file, setFile] = useState<File | null>(null), [cloudCosts, setCloudCosts] = useState(false),[paidFallback,setPaidFallback]=useState(false);
+  const [feishuPanel, setFeishuPanel] = useState<'sync' | 'generate' | null>(null);
   const [fileInputKey,setFileInputKey] = useState(0);
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [repairReport,setRepairReport]=useState<StudioRepairReport|null>(null);
@@ -214,7 +216,8 @@ export function StudioPage() {
   const connections = repairReport?.model_connections || [];
   const connectedCount = connections.filter(service => ['connected', 'recovered', 'busy'].includes(service.status)).length;
   return <div className="studio-workspace">
-    <PageHeader title="项目工作台" description="导入剧本后自动生成分镜和成片。需要绑定人物、产品或声音时，可在制作开始前配置。" actions={<button type="button" className="button button-secondary" disabled={preparationUnsettled||pageBusy||Boolean(pendingImport)} onClick={() => setNewProject(value => !value)}><Plus size={16}/>新建项目</button>}/>
+    <PageHeader title="项目工作台" description="导入剧本后自动生成分镜和成片。需要绑定人物、产品或声音时，可在制作开始前配置。" actions={<div className="toolbar"><button type="button" className="button button-secondary" onClick={() => setFeishuPanel(v => v === 'sync' ? null : 'sync')}><Sparkles size={16}/>一键同步飞书</button><button type="button" className="button button-primary" onClick={() => setFeishuPanel(v => v === 'generate' ? null : 'generate')}><Clapperboard size={16}/>一键生成视频</button><button type="button" className="button button-secondary" disabled={preparationUnsettled||pageBusy||Boolean(pendingImport)} onClick={() => setNewProject(value => !value)}><Plus size={16}/>新建项目</button></div>}/>
+    {feishuPanel ? <FeishuWorkbenchPanel mode={feishuPanel} onClose={() => setFeishuPanel(null)} onProjectsChanged={() => { void studio.refreshList(); }} /> : null}
     <div className="studio-toolbar"><StudioProjectPicker projects={projects} projectId={projectId} selectedName={data?.project.name} disabled={pageBusy||preparationUnsettled||Boolean(pendingImport)||quality.saving||quality.loading} onChange={studio.selectProject}/><button className="button button-secondary" disabled={pageBusy||preparationUnsettled} onClick={() => { void studio.refreshList(); void studio.refresh(); }}><RefreshCw size={15}/>刷新</button>{projectId ? <a className="button button-primary" href={outputLink}>查看成片<ArrowRight size={16}/></a> : null}</div>
     {newProject ? <form className="card studio-panel studio-new-project" onSubmit={e => { e.preventDefault(); if (!name.trim()) return; void perform('create', async () => { const project = await api.createProject({ name: name.trim() }); studio.selectProject(project.id); setName(''); setNewProject(false); }); }}>
       <FormField label="项目名称" required><input value={name} maxLength={200} onChange={e => setName(e.target.value)} required/></FormField><button className="button button-primary" disabled={pageBusy||!name.trim()}>创建项目</button><button type="button" className="button button-secondary" onClick={() => setNewProject(false)}>取消</button>

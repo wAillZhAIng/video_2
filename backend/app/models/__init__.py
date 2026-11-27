@@ -29,6 +29,7 @@ from .character_reference import CharacterReferenceAsset,CharacterReferenceSet
 from .product_library import Product,ProductImage,ProjectProductBinding,ShotProductBinding,ProjectProductionPreference
 from .voice_library import VoiceLibraryAsset
 from .reference_video import ReferenceVideo,ProjectReferenceVideo,VideoAnalysis,StyleProfile
+from .feishu import FeishuBridgeHeartbeat, FeishuSyncJob, FeishuSyncRecord, FeishuGenerationBatch, FeishuGenerationQueueItem
 
 __all__ = [
     "Approval",

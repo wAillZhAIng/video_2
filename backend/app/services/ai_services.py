@@ -29,7 +29,8 @@ MODULES = {'character_generation': {'comfyui','openai_compatible','cloud_draft'}
     'speech_recognition': {'local_asr'}, 'background_music': {'comfyui'},
     'dialogue_generation':{'local_runtime','openai_tts','cloud_draft'},
     'lip_sync':{'local_runtime','cloud_draft'},'video_upscale':{'comfyui','local_runtime','cloud_draft'},
-    'quality_check':{'ffmpeg','openai_compatible','cloud_draft'}}
+    'quality_check':{'ffmpeg','openai_compatible','cloud_draft'},
+    'feishu_sync':{'feishu_bitable'}}
 
 BUILTIN_VIDEO_WORKFLOWS = (
     {'id': 'native_h3_ref2va', 'label': 'MiniMax H3 原生 Ref2VA：Fast 4 / 标准 20 / 高质量 30'},
@@ -45,6 +46,31 @@ def normalize_service_settings(module, provider, base_url, options):
     if module == 'video_generation' and provider == 'comfyui':
         options['workflow_profile'] = 'native_h3_ref2va'
         options['workflow_path'] = str(NATIVE_H3_FAST_WORKFLOW)
+    if module == 'feishu_sync' and provider == 'feishu_bitable':
+        from app.services.feishu_client import DEFAULT_COLUMN_MAPPING, DEFAULT_FEISHU_BITABLE_URL, parse_feishu_bitable_url
+        bitable_url = str(options.get('bitable_url') or DEFAULT_FEISHU_BITABLE_URL).strip()
+        options['bitable_url'] = bitable_url
+        parsed = parse_feishu_bitable_url(bitable_url)
+        if parsed['app_token'] and not options.get('app_token'):
+            options['app_token'] = parsed['app_token']
+        elif parsed['app_token']:
+            options['app_token'] = parsed['app_token']
+        if parsed['table_id']:
+            options['table_id'] = parsed['table_id']
+        if parsed['view_id']:
+            options['view_id'] = parsed['view_id']
+        for col_k, col_default in DEFAULT_COLUMN_MAPPING.items():
+            if not str(options.get(col_k) or '').strip():
+                options[col_k] = col_default
+        engine = str(options.get('analysis_engine') or 'codex').strip().lower()
+        options['analysis_engine'] = engine if engine in {'antigravity', 'codex'} else 'codex'
+        try:
+            options['script_count'] = max(1, min(20, int(options.get('script_count') or 5)))
+        except (TypeError, ValueError):
+            options['script_count'] = 5
+        options.setdefault('analysis_prompt', '')
+        options.setdefault('local_sync_dir', r'E:\feishu_sync')
+        options.setdefault('local_archive_dir', r'E:\vast视频')
     return options
 
 
@@ -61,6 +87,18 @@ def validate_configuration(module, provider, base_url, options):
         gain = options.get('music_gain_db', GAIN_DB)
         if type(gain) not in (int, float) or not math.isfinite(gain) or not -42 <= gain <= -3:
             raise AppError(422, 'music_invalid_gain', '背景音乐混音音量须在 −42 至 −3 dB 之间')
+    if module == 'feishu_sync':
+        allowed = {
+            'timeout', 'concurrency', 'app_id', 'bitable_url', 'app_token', 'table_id', 'view_id',
+            'col_product_name', 'col_reference_video', 'col_reference_image', 'col_task_name', 'col_script_start',
+            'analysis_engine', 'analysis_prompt', 'script_count', 'local_sync_dir', 'local_archive_dir',
+        }
+        eng = str(options.get('analysis_engine') or 'codex').strip().lower()
+        if eng not in {'antigravity', 'codex'}:
+            raise AppError(422, 'feishu_invalid_engine', '视频分析执行引擎仅支持 antigravity 或 codex')
+        sc = options.get('script_count', 5)
+        if not isinstance(sc, int) or not 1 <= sc <= 20:
+            raise AppError(422, 'feishu_invalid_script_count', '脚本数量须为 1 至 20 的整数')
     if set(options) - allowed or any(isinstance(value, (dict, list)) for value in options.values()):
         raise AppError(422, 'invalid_service_settings', '仅接受当前适配器定义的简单参数，禁止在普通配置中保存认证信息')
     if options.get('local_service_origin'):
@@ -331,6 +369,27 @@ async def probe_service(service, settings):
     try:
         if service.provider=='cloud_draft':
             result.update(status='unsupported',error='此云端档案没有执行适配器；未发请求，不能选择为已验证服务')
+        elif service.provider == 'feishu_bitable':
+            from app.services.feishu_client import FeishuClient, parse_feishu_bitable_url
+            opts = dict(service.settings_json or {})
+            app_id = str(opts.get('app_id') or '').strip()
+            bitable_url = str(opts.get('bitable_url') or '').strip()
+            parsed = parse_feishu_bitable_url(bitable_url)
+            app_token = str(opts.get('app_token') or parsed['app_token']).strip()
+            table_id = str(opts.get('table_id') or parsed['table_id']).strip()
+            view_id = str(opts.get('view_id') or parsed['view_id']).strip()
+            if not app_id or not secret:
+                raise AppError(422, 'feishu_credentials_missing', '请填写飞书 App ID 并通过密钥字段保存 App Secret')
+            if not app_token or not table_id:
+                raise AppError(422, 'feishu_table_missing', '请填写有效的飞书多维表格地址（包含 base/app_token 与 table=table_id）')
+            client = FeishuClient(app_id, secret, base_url=service.base_url or 'https://open.feishu.cn')
+            fields = await asyncio.to_thread(client.list_fields, app_token, table_id, view_id or None)
+            col_names = [str(f.get('field_name') or '') for f in fields if f.get('field_name')]
+            result.update(
+                status='connected', http_status=200,
+                notice=f'飞书多维表格连接成功，检测到 {len(col_names)} 列：{"、".join(col_names[:12])}',
+                capabilities={'feishu_sync': {'state': 'verified', 'source': 'Feishu Bitable Open API', 'columns': col_names}},
+            )
         elif service.module == 'background_music':
             from app.services.background_music import probe_model
             capability = await probe_model(settings, snapshot)

@@ -32,6 +32,8 @@ from app.services.screenplay_generation import screenplay_worker
 from app.api.product_library import router as product_library_router
 from app.api.voice_library import router as voice_library_router
 from app.api.reference_video_library import router as reference_video_router
+from app.api.feishu_sync import router as feishu_router
+from app.services.feishu_orchestrator import feishu_queue_worker
 from app.services.reference_video_analysis import reference_video_worker
 from app.services.media_processing import media_worker
 from app.services.model_lab import model_lab_worker
@@ -79,13 +81,17 @@ class FrontendFiles(StaticFiles):
         try:
             response = await super().get_response(path, scope)
             if response.status_code != 404:
+                if normalized in ('', '.', 'index.html') or response.headers.get('content-type', '').startswith('text/html'):
+                    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
                 return response
         except StarletteHTTPException as exc:
             if exc.status_code != 404:
                 raise
         if normalized.startswith('assets/') and normalized not in {'assets/products','assets/videos','assets/voices'}:
             raise StarletteHTTPException(404)
-        return await super().get_response('index.html', scope)
+        response = await super().get_response('index.html', scope)
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        return response
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -132,12 +138,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         media_task = asyncio.create_task(_supervise_worker('media', lambda: media_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
         screenplay_task = asyncio.create_task(_supervise_worker('screenplay', lambda: screenplay_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
         reference_video_task = asyncio.create_task(_supervise_worker('reference_video', lambda: reference_video_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
+        feishu_task = asyncio.create_task(_supervise_worker('feishu_queue', lambda: feishu_queue_worker(resolved_settings, session_factory))) if not resolved_settings.h3_demo_mode else None
         app.state.worker_tasks={name:task for name,task in {
             'jobs':task,'character':image_task,'assembly':assembly_task,'visual':cinematic_visual_task,
             'production':production_task,'studio':studio_task,'quality':quality_task,'model_lab':model_lab_task,
-            'media':media_task,'screenplay':screenplay_task,'reference_video':reference_video_task}.items() if task is not None}
+            'media':media_task,'screenplay':screenplay_task,'reference_video':reference_video_task,'feishu_queue':feishu_task}.items() if task is not None}
         yield
-        for cinematic_task in (cinematic_visual_task,production_task,studio_task,quality_task,model_lab_task,media_task,screenplay_task,reference_video_task):
+        for cinematic_task in (cinematic_visual_task,production_task,studio_task,quality_task,model_lab_task,media_task,screenplay_task,reference_video_task,feishu_task):
             if cinematic_task:
                 cinematic_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):await cinematic_task
@@ -226,6 +233,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(product_library_router)
     application.include_router(voice_library_router)
     application.include_router(reference_video_router)
+    application.include_router(feishu_router)
     frontend = PROJECT_ROOT / 'frontend' / 'dist'
     if os.getenv('VIDEO_FACTORY_PORTABLE') == '1' and (frontend / 'index.html').exists():
         @application.get('/api/portable/status')

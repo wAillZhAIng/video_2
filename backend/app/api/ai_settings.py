@@ -26,7 +26,7 @@ def service_options():
     return {'container': container, 'defaults': {
         'comfyui': f'http://{host}:8189', 'local_llm': f'http://{host}:1234/v1',
         'local_asr': ASR_URL,
-        'background_music': os.getenv('COMFYUI_BASE_URL', 'http://127.0.0.1:8189')}, 'video_workflows': BUILTIN_VIDEO_WORKFLOWS,
+        'background_music': os.getenv('COMFYUI_BASE_URL', 'http://127.0.0.1:8189'), 'feishu_api': 'https://open.feishu.cn', 'feishu_bitable_url': 'https://xcnzovkanfw8.feishu.cn/base/Dakxb6f3aalMdssK4Tmc2WninNf?table=tblVtjouz9F0855v&view=vewT6bwcpf'}, 'video_workflows': BUILTIN_VIDEO_WORKFLOWS,
         'notice': '模型独立安装并启动；连接测试不下载权重、不生成付费任务。语音和口型固定运行时尚不支持任意HTTP接口。'}
 
 
