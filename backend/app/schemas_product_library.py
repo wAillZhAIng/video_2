@@ -51,22 +51,22 @@ class ProductionPreferenceEdit(Strict):
 class ShotProductReferenceEdit(Strict):
     product_id:str
     expected_revision:int=Field(ge=0)
-    video_image_ids:list[str]=Field(max_length=8)
+    video_image_ids:list[str]=Field(max_length=9)
     keyframe_image_ids:list[str]=Field(max_length=4)
 class ShotProductReferencesEdit(Strict):
     products:list[ShotProductReferenceEdit]=Field(max_length=4)
 
 class ExistingProjectShotProduct(Strict):
     shot_id:str=Field(min_length=1,max_length=64)
-    image_ids:list[str]=Field(min_length=1,max_length=8)
+    image_ids:list[str]=Field(min_length=1,max_length=9)
     visible_state:str=Field(default='',max_length=2000)
 class ExistingProjectProductBind(Strict):
     product_id:str=Field(min_length=1,max_length=64)
-    image_ids:list[str]=Field(min_length=1,max_length=8)
+    image_ids:list[str]=Field(min_length=1,max_length=9)
     shots:list[ExistingProjectShotProduct]=Field(min_length=1,max_length=100)
 
 class ProjectProductReferenceEdit(Strict):
     product_id:str=Field(min_length=1,max_length=64)
     expected_token:str=Field(min_length=64,max_length=64)
-    image_ids:list[str]=Field(default_factory=list,max_length=8)
+    image_ids:list[str]=Field(default_factory=list,max_length=9)
     shot_ids:list[str]=Field(default_factory=list,max_length=1000)

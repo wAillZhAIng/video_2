@@ -261,6 +261,15 @@ def bind_created_project(session,job,result):
             state={k:v for k,v in value.items() if k not in {'keyframe_image_ids','video_image_ids','reference_selection_confirmed'}}
             session.add(ShotProductBinding(project_id=job.project_id,shot_id=shot_id,product_id=identifier,image_ids_json=[i['id'] for i in product['images']],state_json=state))
 
+def _frozen_image_relative_path(item):
+    rel = item.get('relative_path')
+    if rel:
+        return rel
+    media_url = item.get('media_url') or ''
+    if media_url.startswith('/api/media/'):
+        return media_url[len('/api/media/'):]
+    raise AppError(409, 'product_frozen_image_missing', '冻结产品参考图缺少相对路径')
+
 def shot_references(session,settings,shot,*,stage='video',include_image_notes=False,exclude_product_ids=()):
     result=[]
     for binding in session.scalars(select(ShotProductBinding).where(ShotProductBinding.shot_id==shot.id).order_by(ShotProductBinding.product_id)):
@@ -272,10 +281,11 @@ def shot_references(session,settings,shot,*,stage='video',include_image_notes=Fa
         if chosen-{item['id'] for item in project.snapshot_json.get('images',[])}:raise AppError(409,'product_frozen_image_missing','镜头所选产品图不在冻结项目资料中')
         for item in project.snapshot_json.get('images',[]):
             if item['id'] not in chosen:continue
-            path=safe_media_path(settings.media_root,item['relative_path'],must_exist=True)
+            rel_path=_frozen_image_relative_path(item)
+            path=safe_media_path(settings.media_root,rel_path,must_exist=True)
             if sha(path.read_bytes())!=item['sha256']:raise AppError(409,'product_source_changed','冻结产品参考图发生变化')
             ref={'id':item['id'],'product_id':binding.product_id,'source':'product_library','purpose':item['purpose'],'order':item['order'],
-                 'relative_path':item['relative_path'],'absolute_path':str(path),'sha256':item['sha256'],'product_name':_snapshot_product_name(session, project),'visible_state':binding.state_json}
+                 'relative_path':rel_path,'absolute_path':str(path),'sha256':item['sha256'],'product_name':_snapshot_product_name(session, project),'visible_state':binding.state_json}
             if include_image_notes:
                 ref['image_notes']=item.get('notes','')
             result.append(ref)
@@ -285,7 +295,7 @@ def shot_product_snapshot(session,shot):
     result=[]
     for binding in session.scalars(select(ShotProductBinding).where(ShotProductBinding.shot_id==shot.id).order_by(ShotProductBinding.product_id)):
         project=session.scalar(select(ProjectProductBinding).where(ProjectProductBinding.project_id==shot.project_id,ProjectProductBinding.product_id==binding.product_id))
-        if project:result.append({'product_id':binding.product_id,'state':binding.state_json,'images':[{k:i[k] for k in ('id','sha256','relative_path','purpose','order')} for i in project.snapshot_json.get('images',[]) if i['id'] in binding.image_ids_json]})
+        if project:result.append({'product_id':binding.product_id,'state':binding.state_json,'images':[{'id':i['id'],'sha256':i['sha256'],'relative_path':_frozen_image_relative_path(i),'purpose':i['purpose'],'order':i['order']} for i in project.snapshot_json.get('images',[]) if i['id'] in binding.image_ids_json]})
     return result
 
 def _snapshot_product_name(session, binding):

@@ -67,8 +67,8 @@ def bind_product(client, settings, product):
         shot = m.StoryboardShot(project_id=project['id'], order=1, scene_title='Local fixture product view')
         session.add(shot)
         session.flush()
-        frozen = product_library.freeze_products(session, settings,
-            [ProductSelection(product_id=product['id'], image_ids=[image['id'] for image in product['images']])])[0]
+        frozen = product_library.freeze_video_product_references(session, settings,
+            product['id'], [image['id'] for image in product['images']])
         project_binding = m.ProjectProductBinding(project_id=project['id'], product_id=product['id'], snapshot_json=frozen)
         shot_binding = m.ShotProductBinding(project_id=project['id'], shot_id=shot.id, product_id=product['id'],
             image_ids_json=[image['id'] for image in frozen['images']], state_json={'visible_state': 'visible'})
@@ -527,7 +527,8 @@ def test_studio_plan_selects_explicit_images_by_script_entities_and_preserves_ex
             assert uploaded[2]['id'] not in {x['id'] for x in refs}
             assert session.get(m.StoryboardShot,shot.id).status=='approved'
         assert run.snapshot_json['options']['product_reference_plan']==plan
-        assert any(n['kind']=='keyframe' and n['target_id']==shots[0].id for n in run.nodes_json)
+        assert any(n['kind']=='video' and n['target_id']==shots[0].id for n in run.nodes_json)
+        assert not any(n['kind']=='keyframe' and n['target_id']==shots[0].id for n in run.nodes_json)
 
 
 def test_studio_product_plan_does_not_guess_when_brand_absent(client, settings):
@@ -651,3 +652,31 @@ def test_reference_selection_reads_word_import_placeholder_snapshot(client):
     response = client.get('/api/product-library/projects/' + project['id'] + '/shots/' + shot_id + '/references')
     assert response.status_code == 200, response.text
     assert response.json()['products'][0]['name'] == product['name']
+
+
+@pytest.mark.parametrize('path_kind', ['relative_path', 'media_url'])
+def test_frozen_product_image_path_uses_existing_snapshot_fields(client, settings, path_kind):
+    product = create_product(client)
+    upload(client, product['id'], [png()])
+    product = client.get('/api/product-library/' + product['id']).json()
+    _, shot_id, binding_id, frozen = bind_product(client, settings, product)
+    expected = frozen['images'][0]['relative_path']
+    with client.app.state.session_factory() as session:
+        binding = session.get(m.ProjectProductBinding, binding_id)
+        snapshot = copy.deepcopy(binding.snapshot_json)
+        if path_kind == 'media_url':
+            snapshot['images'][0].pop('relative_path')
+        binding.snapshot_json = snapshot
+        session.commit()
+        shot = session.get(m.StoryboardShot, shot_id)
+        refs = product_library.shot_references(session, settings, shot)
+        assert refs[0]['relative_path'] == expected
+        assert product_library.shot_product_snapshot(session, shot)[0]['images'][0]['relative_path'] == expected
+        assert binding.snapshot_json == snapshot
+
+
+@pytest.mark.parametrize('image', [{}, {'media_url': 'https://other.invalid/image.png'}])
+def test_frozen_product_image_rejects_missing_local_path(image):
+    with pytest.raises(AppError) as error:
+        product_library._frozen_image_relative_path(image)
+    assert error.value.code == 'product_frozen_image_missing'

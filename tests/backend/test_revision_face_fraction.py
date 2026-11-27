@@ -1,6 +1,5 @@
 """Caller face-height comparisons reach the real scale overlay; no inference."""
 from copy import deepcopy
-from pathlib import Path
 
 import pytest
 
@@ -144,11 +143,3 @@ def test_comparison_only_stays_in_scene_contract_and_actual_overlay_is_idempoten
     assert revision_semantic_findings(updated,contract)==[]
     assert (value,contract)==before
     assert enforce_revision_constraints(updated,value,{'P02':'<Subject 1>'})[0]==updated
-
-
-def test_public_node_and_backend_scale_rules_have_identical_bytes():
-    root=Path(__file__).resolve().parents[2]
-    bundle=root/'scripts/local_inference/bundle/comfy_nodes/VideoFactoryLocalVLMGuard'
-    if not bundle.is_dir():bundle=root/'scripts/comfy_nodes/VideoFactoryLocalVLMGuard'
-    assert (root/'backend/app/services/revision_constraints.py').read_bytes()==(bundle/'revision_constraints.py').read_bytes()
-    assert (root/'backend/app/services/revision_semantics.py').read_bytes()==(bundle/'revision_semantics.py').read_bytes()

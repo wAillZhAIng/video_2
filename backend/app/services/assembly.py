@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 import math
+import os
 import queue
 import subprocess
 import threading
@@ -146,11 +148,18 @@ def validate_timeline(session, settings, project_id, payload: TimelineRequest, *
         metadata = probe(path, tools)
         sources.append((item, video, path, source_hash, metadata))
     output = resolve_output_resolution(payload.output, [metadata for _, _, _, _, metadata in sources])
+    def _verify_decode(media_path):
+        return subprocess.run([tools.ffmpeg_path, '-v', 'error', '-xerror', '-i', str(media_path), '-f', 'null', '-'], capture_output=True, timeout=120, shell=False).returncode
+
+    if len(sources) > 1:
+        with ThreadPoolExecutor(max_workers=min(len(sources), 6)) as pool:
+            decode_codes = list(pool.map(_verify_decode, [path for _, _, path, _, _ in sources]))
+    else:
+        decode_codes = [_verify_decode(path) for _, _, path, _, _ in sources]
+    if any(code != 0 for code in decode_codes):
+        raise AppError(422, 'input_decode_failed', '输入视频完整解码失败，不能提交合成')
     clips = []
     for item, video, path, source_hash, metadata in sources:
-        decoded = subprocess.run([tools.ffmpeg_path, '-v', 'error', '-xerror', '-i', str(path), '-f', 'null', '-'], capture_output=True, timeout=120, shell=False)
-        if decoded.returncode:
-            raise AppError(422, 'input_decode_failed', '输入视频完整解码失败，不能提交合成')
         preserve_full = item.trim_start == 0 and item.trim_end is None
         timing = full_clip_timing(metadata, output['fps']) if preserve_full else None
         source_end=metadata['duration'] if item.trim_end is None else item.trim_end
@@ -231,7 +240,8 @@ def effect(edge):
 
 def command_for(settings, snapshot, destination, music_assets=()):
     output, clips = snapshot['output'], snapshot['clips']
-    command = [snapshot['service_snapshot']['settings'].get('ffmpeg_path') or settings.ffmpeg_path, '-hide_banner', '-n', '-filter_complex_threads', '1']
+    filter_threads = min(16, max(2, os.cpu_count() or 4))
+    command = [snapshot['service_snapshot']['settings'].get('ffmpeg_path') or settings.ffmpeg_path, '-hide_banner', '-n', '-filter_complex_threads', str(filter_threads)]
     filters = []
     fps = output['fps']
     for index, clip in enumerate(clips):
@@ -241,14 +251,16 @@ def command_for(settings, snapshot, destination, music_assets=()):
         command += ['-i', str(path)]
         start, length = clip.get('trim_start', 0), clip['duration']
         timing = clip.get('full_stream_timing')
+        same_size = clip['source'].get('width') == output['width'] and clip['source'].get('height') == output['height']
+        scale_pad = 'setsar=1' if same_size else f'scale={output["width"]}:{output["height"]}:force_original_aspect_ratio=decrease:flags=lanczos,pad={output["width"]}:{output["height"]}:(ow-iw)/2:(oh-ih)/2,setsar=1'
         if timing:
             head = timing['video_offset']
             full_length = timing['duration']
             # A transition preview is a segment of the already padded full
             # timeline, so retain offsets before selecting that segment.
-            filters.append(f'[{index}:v:0]setpts=PTS-STARTPTS,tpad=start_mode=clone:start_duration={head:.8f}:stop_mode=clone:stop_duration={full_length:.8f},scale={output["width"]}:{output["height"]}:force_original_aspect_ratio=decrease:flags=lanczos,pad={output["width"]}:{output["height"]}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},trim=start={start:.8f}:duration={length:.8f},setpts=PTS-STARTPTS,format=yuv420p,settb=AVTB[v{index}]')
+            filters.append(f'[{index}:v:0]setpts=PTS-STARTPTS,tpad=start_mode=clone:start_duration={head:.8f}:stop_mode=clone:stop_duration={full_length:.8f},{scale_pad},fps={fps},trim=start={start:.8f}:duration={length:.8f},setpts=PTS-STARTPTS,format=yuv420p,settb=AVTB[v{index}]')
         else:
-            filters.append(f'[{index}:v:0]trim=start={start:.8f}:duration={length:.8f},setpts=PTS-STARTPTS,scale={output["width"]}:{output["height"]}:force_original_aspect_ratio=decrease:flags=lanczos,pad={output["width"]}:{output["height"]}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p,settb=AVTB[v{index}]')
+            filters.append(f'[{index}:v:0]trim=start={start:.8f}:duration={length:.8f},setpts=PTS-STARTPTS,{scale_pad},fps={fps},format=yuv420p,settb=AVTB[v{index}]')
         if output['audio_policy'] != 'mute':
             if clip['source']['has_audio']:
                 if timing:
@@ -259,23 +271,34 @@ def command_for(settings, snapshot, destination, music_assets=()):
             else:
                 filters.append(f'anullsrc=r=48000:cl=stereo,atrim=duration={length:.8f},asetpts=PTS-STARTPTS[a{index}]')
     v, a, elapsed = 'v0', 'a0', clips[0]['duration']
-    for index, edge in enumerate(snapshot['transitions']):
-        next_v, next_a, overlap = f'vm{index}', f'am{index}', edge['duration']
-        if overlap == 0:
-            filters.append(f'[{v}][v{index+1}]concat=n=2:v=1:a=0,settb=AVTB[{next_v}]')
-        else:
-            filters.append(f'[{v}][v{index+1}]xfade=transition={effect(edge)}:duration={overlap:.8f}:offset={elapsed-overlap:.8f}[{next_v}]')
+    transitions = snapshot['transitions']
+    if transitions and all(edge['duration'] == 0 for edge in transitions):
+        v_inputs = ''.join(f'[v{i}]' for i in range(len(clips)))
+        filters.append(f'{v_inputs}concat=n={len(clips)}:v=1:a=0,settb=AVTB[vm0]')
+        v = 'vm0'
         if output['audio_policy'] != 'mute':
-            if overlap and edge['audio'] == 'crossfade':
-                filters.append(f'[{a}][a{index+1}]acrossfade=d={overlap:.8f}:c1=tri:c2=tri[{next_a}]')
-            elif overlap:
-                filters.append(f'[{a}]atrim=duration={elapsed-overlap/2:.8f}[al{index}]')
-                filters.append(f'[a{index+1}]atrim=start={overlap/2:.8f},asetpts=PTS-STARTPTS[ar{index}]')
-                filters.append(f'[al{index}][ar{index}]concat=n=2:v=0:a=1[{next_a}]')
+            a_inputs = ''.join(f'[a{i}]' for i in range(len(clips)))
+            filters.append(f'{a_inputs}concat=n={len(clips)}:v=0:a=1[am0]')
+            a = 'am0'
+        elapsed = sum(clip['duration'] for clip in clips)
+    else:
+        for index, edge in enumerate(transitions):
+            next_v, next_a, overlap = f'vm{index}', f'am{index}', edge['duration']
+            if overlap == 0:
+                filters.append(f'[{v}][v{index+1}]concat=n=2:v=1:a=0,settb=AVTB[{next_v}]')
             else:
-                filters.append(f'[{a}][a{index+1}]concat=n=2:v=0:a=1[{next_a}]')
-        v, a = next_v, next_a
-        elapsed += clips[index+1]['duration'] - overlap
+                filters.append(f'[{v}][v{index+1}]xfade=transition={effect(edge)}:duration={overlap:.8f}:offset={elapsed-overlap:.8f}[{next_v}]')
+            if output['audio_policy'] != 'mute':
+                if overlap and edge['audio'] == 'crossfade':
+                    filters.append(f'[{a}][a{index+1}]acrossfade=d={overlap:.8f}:c1=tri:c2=tri[{next_a}]')
+                elif overlap:
+                    filters.append(f'[{a}]atrim=duration={elapsed-overlap/2:.8f}[al{index}]')
+                    filters.append(f'[a{index+1}]atrim=start={overlap/2:.8f},asetpts=PTS-STARTPTS[ar{index}]')
+                    filters.append(f'[al{index}][ar{index}]concat=n=2:v=0:a=1[{next_a}]')
+                else:
+                    filters.append(f'[{a}][a{index+1}]concat=n=2:v=0:a=1[{next_a}]')
+            v, a = next_v, next_a
+            elapsed += clips[index+1]['duration'] - overlap
     if output['audio_policy'] != 'mute':
         a = append_mix(settings, snapshot, command, filters, a, music_assets)
     if output['audio_policy'] == 'fade' and output['fade_duration']:
@@ -292,7 +315,10 @@ def command_for(settings, snapshot, destination, music_assets=()):
         command+=['-i',str(subtitle_file),'-map',f'{len(clips)+len(music_assets)}:s:0','-c:s','mov_text','-metadata:s:s:0','language=zho']
     command += ['-filter_complex', ';'.join(filters), '-map', f'[{v}]']
     command += ['-an'] if output['audio_policy'] == 'mute' else ['-map', f'[{a}]', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000']
-    command += ['-c:v', output['codec'], '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-r', str(fps), '-t', f'{snapshot["duration"]:.8f}', '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', str(destination)]
+    is_high_res = max(output['width'], output['height']) > 1920
+    preset = 'veryfast' if is_high_res else 'fast'
+    enc_threads = str(min(16, max(4, os.cpu_count() or 4)))
+    command += ['-c:v', output['codec'], '-crf', '18', '-preset', preset, '-threads', enc_threads, '-pix_fmt', 'yuv420p', '-r', str(fps), '-t', f'{snapshot["duration"]:.8f}', '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', str(destination)]
     return command
 
 
