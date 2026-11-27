@@ -130,3 +130,60 @@ def test_url_validator_enforces_allowlist_and_dns_rebinding_check() -> None:
         validate_url_target("https://docs.example.test/page", settings, private_resolver)
     assert rebound.value.code == "unsafe_url"
 
+
+def test_parser_handles_feishu_time_ranges_and_global_setting() -> None:
+    raw = """【全局设定】
+总时长：17秒｜画幅：9:16竖屏｜风格：写实自然光影电影感
+人物锚点：28岁东亚青年男性，戴哑光黑城市骑行头盔。
+产品锁死锚点：黑色磨砂翼型转向尾灯。
+禁止项：禁止出现字幕花字、水印、人物变脸。
+
+镜头1（0-4秒）
+景别与机位：中近景，后方追随跟拍。
+画面主体：青年男子骑行向前。
+动作轨迹：男子急停靠边回头。
+运镜：手持稳定器前推跟拍。
+光线与产品细节：阴天冷白自然光。
+音效：刹车摩擦声。
+
+镜头2（4-6秒）
+画面主体：双手打开产品包装盒。
+动作轨迹：右手取出转向尾灯展示。
+音效：纸盒翻盖声。
+
+镜头3（6-9.5秒）
+- 画面主体与动作轨迹：将尾灯扣紧在座管上并点亮。
+- 运镜与光线：固定特写，黄昏蓝调冷光。
+- 音效：咔哒声。
+"""
+    result = DeterministicScriptParser().parse(raw)
+    assert result["warnings"] == []
+    assert len(result["shots"]) == 3
+    assert [s["order"] for s in result["shots"]] == [1, 2, 3]
+    assert [s["duration_seconds"] for s in result["shots"]] == [4.0, 2.0, 3.5]
+    assert "全局设定" in result["metadata"]
+    assert "总时长" not in result["metadata"]["全局设定"]
+    assert "青年男子骑行向前" in result["shots"][0]["visual_prompt"]
+    assert "黑色磨砂翼型转向尾灯" in result["shots"][0]["visual_prompt"]
+    assert "禁止出现字幕花字" in result["shots"][0]["negative_prompt"]
+    assert "刹车摩擦声" in result["shots"][0]["audio_direction"]
+    assert "扣紧在座管上" in result["shots"][2]["visual_prompt"]
+
+
+def test_parser_handles_compact_inline_shots_without_blank_lines() -> None:
+    raw = """【全局设定】
+画幅与画质：9:16竖屏，4K写实实拍质感，严禁出现字幕花字、水印。
+产品锚点：浅鸭蛋青色哑光鸭蛋捏捏。
+
+【分镜脚本（总时长3.2秒，共3镜）】
+镜头1（0-2.0秒）：45°高俯拍POV近景固定机位。双手捧住鸭蛋捏捏捏裂脆壳。
+镜头2（2.0-2.7秒）：硬跳切，俯拍近景。右手拇指按入亮橘红软芯。
+镜头3（2.7-3.2秒）：硬跳切收尾，掌心托举回弹定格。
+"""
+    result = DeterministicScriptParser().parse(raw)
+    assert result["warnings"] == []
+    assert len(result["shots"]) == 3
+    assert [s["duration_seconds"] for s in result["shots"]] == [2.0, 0.7, 0.5]
+    assert "双手捧住鸭蛋捏捏" in result["shots"][0]["visual_prompt"]
+    assert "浅鸭蛋青色哑光鸭蛋捏捏" in result["shots"][1]["visual_prompt"]
+    assert "严禁出现字幕花字" in result["shots"][0]["negative_prompt"]
