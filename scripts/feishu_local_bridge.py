@@ -352,12 +352,39 @@ def build_agent_prompt(
     analysis_prompt: str,
     script_count: int,
     script_cols: list[str],
+    engine: str = "codex",
 ) -> str:
     imgs_text = "\n".join(f"- {p}" for p in image_paths) if image_paths else "- (无参考图)"
     user_req = analysis_prompt.strip() or (
         "保留参考视频的镜头节奏、景别与物理交互结构，严格保持参考图中的产品外观一致性，"
         "生成彼此场景、手部肤色/美甲或服装袖口各不相同的带货分镜脚本。"
     )
+    if engine == "antigravity":
+        delivery_rule = f"""3. **极其重要（零阻塞规则）**：
+   - `rea-video decompose` 已提前跑完，结果全部位于 `{rea_out_dir}`（`VIDEO.md`、`video/*.md`、`video/shots/*.md`、`storyboard.jpg`、`shots/shot_*.jpg`），请只使用 `read_file` 查看这些图文资料与参考图即可；
+   - **禁止调用 `run_command`，禁止调用 `write_file` 或 `edit_file`（避免触发人工审批弹窗卡住流程）**；
+   - 请直接在你的最终回复正文中输出一个严格合法的 ```json ... ``` 代码块（UTF-8，不要在 JSON 内加注释），结构如下：
+```json
+{{
+  "summary": "一句话总结参考视频拆解要点（镜头数、总时长、节奏风格）",
+  "scripts": [
+    {{"index": 1, "column": "{script_cols[0]}", "text": "完整分镜脚本1文本..."}},
+    ...
+  ]
+}}
+```
+   - 务必确保 JSON 语法完全合法且 `scripts` 数组恰好包含 {script_count} 条脚本！"""
+    else:
+        delivery_rule = f"""3. 最终请把严格合法的 UTF-8 JSON 写入文件：`{output_json_path}`，JSON 结构如下（不要包含注释或多余文字）：
+{{
+  "summary": "一句话总结参考视频拆解要点（镜头数、总时长、节奏风格）",
+  "scripts": [
+    {{"index": 1, "column": "{script_cols[0]}", "text": "完整分镜脚本1文本..."}},
+    ...
+  ]
+}}
+写完 `{output_json_path}` 后请校验该 JSON 可被 Python `json.loads` 正确解析且 `len(scripts) == {script_count}`。"""
+
     return f"""请使用 rea-video 技能对以下参考视频进行深度逐镜头解析，并严格按用户要求生成 {script_count} 份彼此不同的成品视频分镜脚本。
 
 【素材路径（本机磁盘）】
@@ -366,7 +393,7 @@ def build_agent_prompt(
 - 参考视频：{video_path}
 - 参考图：
 {imgs_text}
-- rea-video 已预拆解目录（内含 breakdown.json、关键帧与节奏分析，可直接读取并看图复核；如需要也可再次运行 rea-video review / summary）：{rea_out_dir}
+- rea-video 已预拆解目录（内含 VIDEO.md、video/*.md、storyboard.jpg、shots/shot_*.jpg、breakdown.json）：{rea_out_dir}
 
 【用户分析视频提示词与脚本内容要求】
 {user_req}
@@ -374,26 +401,92 @@ def build_agent_prompt(
 【输出格式要求（极其重要）】
 1. 必须生成 **恰好 {script_count} 份彼此不同的分镜脚本**，分别对应飞书列：{', '.join(script_cols)}。
 2. 每份脚本文本必须直接适配 video_2 分镜解析器，采用清晰分段的分镜格式（包含全局设定与 `镜头1（0-5秒）`、`镜头2（5-10秒）`...，每镜明确画面主体、动作轨迹、运镜、光线、产品一致性细节与音效）。
-3. 最终请把严格合法的 UTF-8 JSON 写入文件：`{output_json_path}`，JSON 结构如下（不要包含注释或多余文字）：
-{{
-  "summary": "一句话总结参考视频拆解要点（镜头数、总时长、节奏风格）",
-  "scripts": [
-    {{"index": 1, "column": "{script_cols[0]}", "text": "完整分镜脚本1文本..."}},
-    ...
-  ]
-}}
-写完 `{output_json_path}` 后请校验该 JSON 可被 Python `json.loads` 正确解析且 `len(scripts) == {script_count}`。
+{delivery_rule}
 """
 
 
-def parse_scripts_output(output_json_path: Path, fallback_text: str, script_cols: list[str]) -> tuple[str, list[dict[str, Any]]]:
-    raw_obj: dict[str, Any] | None = None
-    if output_json_path.is_file():
-        raw_obj = json.loads(output_json_path.read_text(encoding="utf-8-sig"))
-    elif fallback_text:
-        m = re.search(r"\{[\s\S]*\"scripts\"[\s\S]*\}", fallback_text)
-        if m:
-            raw_obj = json.loads(m.group(0))
+def _extract_json_dict_from_text(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    # 1. Try fenced ```json ... ``` blocks first (prefer last one)
+    for block in reversed(re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)):
+        try:
+            obj = json.loads(block)
+            if isinstance(obj, dict) and isinstance(obj.get("scripts"), list) and obj["scripts"]:
+                return obj
+        except Exception:
+            continue
+    # 2. Try direct parse
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(stripped)
+            if isinstance(obj, dict) and isinstance(obj.get("scripts"), list) and obj["scripts"]:
+                return obj
+        except Exception:
+            pass
+    # 3. Try greedy outer braces
+    m = re.search(r"\{[\s\S]*\"scripts\"[\s\S]*\}", text)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict) and isinstance(obj.get("scripts"), list) and obj["scripts"]:
+                return obj
+        except Exception:
+            pass
+    return None
+
+
+def _extract_scripts_from_antigravity_transcript(conv_id: str) -> dict[str, Any] | None:
+    if not conv_id:
+        return None
+    brain_dir = Path.home() / ".gemini" / "antigravity" / "brain" / conv_id / ".system_generated" / "logs"
+    for fname in ("transcript_full.jsonl", "transcript.jsonl"):
+        tpath = brain_dir / fname
+        if not tpath.is_file():
+            continue
+        try:
+            lines = tpath.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            if entry.get("type") != "PLANNER_RESPONSE":
+                continue
+            # A. Check assistant text response / content
+            for field in ("response", "content", "text"):
+                val = entry.get(field)
+                if isinstance(val, str):
+                    parsed = _extract_json_dict_from_text(val)
+                    if parsed:
+                        return parsed
+            # B. Fallback: if model called write_file with Content (even while awaiting approval)
+            for tc in entry.get("tool_calls") or []:
+                if tc.get("name") == "write_file":
+                    raw_content = (tc.get("args") or {}).get("Content")
+                    if isinstance(raw_content, str):
+                        try:
+                            unwrapped = json.loads(raw_content) if raw_content.startswith('"') else raw_content
+                        except Exception:
+                            unwrapped = raw_content
+                        if isinstance(unwrapped, str):
+                            parsed = _extract_json_dict_from_text(unwrapped)
+                            if parsed:
+                                return parsed
+    return None
+
+
+def parse_scripts_output(output_json_path: Path, fallback_text: str, script_cols: list[str], raw_obj: dict[str, Any] | None = None) -> tuple[str, list[dict[str, Any]]]:
+    if raw_obj is None:
+        if output_json_path.is_file():
+            raw_obj = json.loads(output_json_path.read_text(encoding="utf-8-sig"))
+        elif fallback_text:
+            raw_obj = _extract_json_dict_from_text(fallback_text)
     if not isinstance(raw_obj, dict) or not isinstance(raw_obj.get("scripts"), list):
         raise RuntimeError(f"Agent 未输出合法的 scripts_out.json ({output_json_path})")
     summary = str(raw_obj.get("summary") or "")
@@ -410,6 +503,11 @@ def parse_scripts_output(output_json_path: Path, fallback_text: str, script_cols
             out.append({"index": i, "column": col, "text": txt})
     if not out:
         raise RuntimeError("生成的脚本列表为空")
+    # Always persist canonical normalized JSON to output_json_path
+    output_json_path.write_text(
+        json.dumps({"summary": summary, "scripts": out}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     return summary, out
 
 
@@ -474,6 +572,10 @@ def run_antigravity_engine(prompt: str, work_dir: Path, output_json_path: Path, 
                 return parse_scripts_output(output_json_path, "", script_cols)
             except Exception:
                 pass
+        extracted = _extract_scripts_from_antigravity_transcript(conv_id)
+        if extracted:
+            log(f"Extracted {len(extracted.get('scripts') or [])} scripts from Antigravity conversation {conv_id}!")
+            return parse_scripts_output(output_json_path, "", script_cols, raw_obj=extracted)
         if conv_id:
             try:
                 st = httpx.post(
@@ -484,14 +586,14 @@ def run_antigravity_engine(prompt: str, work_dir: Path, output_json_path: Path, 
                 )
                 if st.status_code == 200:
                     run_state = ((st.json().get("conversation") or {}).get("state") or {}).get("runState")
-                    if run_state == "RUN_STATE_IDLE" and output_json_path.is_file():
-                        return parse_scripts_output(output_json_path, "", script_cols)
                     if run_state == "RUN_STATE_IDLE":
-                        # Give 5s grace then stop waiting
-                        time.sleep(5)
+                        time.sleep(2)
+                        extracted = _extract_scripts_from_antigravity_transcript(conv_id)
+                        if extracted:
+                            return parse_scripts_output(output_json_path, "", script_cols, raw_obj=extracted)
                         if output_json_path.is_file():
                             return parse_scripts_output(output_json_path, "", script_cols)
-                        raise RuntimeError(f"Antigravity 对话 {conv_id} 已结束，但未找到输出文件 {output_json_path}")
+                        raise RuntimeError(f"Antigravity 对话 {conv_id} 已结束，但未找到有效脚本 JSON")
             except RuntimeError:
                 raise
             except Exception:
@@ -635,30 +737,46 @@ def process_sync_job(claimed: dict[str, Any]) -> None:
                 continue
 
             # 4. Run rea-video decompose + selected engine (Antigravity / Codex)
-            post_progress(
-                job_id,
-                status="analyzing",
-                current_record_id=rid,
-                current_stage=f"正在用 {engine} + rea-video 解析「{product_name}」并生成 {script_count} 份脚本…",
-                log=f"启动 rea-video decompose ({video_local.name})",
-            )
-            rea_out = run_rea_video_decompose(video_local, rec_dir / "rea_out")
             scripts_out_path = rec_dir / "scripts_out.json"
-            prompt = build_agent_prompt(
-                video_path=video_local,
-                image_paths=image_locals,
-                rea_out_dir=rea_out,
-                output_json_path=scripts_out_path,
-                product_name=product_name,
-                task_name=task_name,
-                analysis_prompt=analysis_prompt,
-                script_count=script_count,
-                script_cols=script_cols,
-            )
-            if engine == "antigravity":
-                summary, scripts = run_antigravity_engine(prompt, rec_dir, scripts_out_path, script_cols, f"{product_name}-{task_name}")
+            if scripts_out_path.is_file() and not force_rerun:
+                try:
+                    summary, scripts = parse_scripts_output(scripts_out_path, "", script_cols)
+                    if len(scripts) >= script_count:
+                        log(f"Reusing cached local {scripts_out_path} ({len(scripts)} scripts) for {rid}")
+                    else:
+                        scripts = []
+                except Exception:
+                    scripts = []
             else:
-                summary, scripts = run_codex_engine(prompt, rec_dir, scripts_out_path, script_cols)
+                scripts = []
+
+            if not scripts:
+                post_progress(
+                    job_id,
+                    status="analyzing",
+                    current_record_id=rid,
+                    current_stage=f"正在用 {engine} + rea-video 解析「{product_name}」并生成 {script_count} 份脚本…",
+                    log=f"启动 rea-video decompose ({video_local.name})",
+                )
+                rea_out = rec_dir / "rea_out"
+                if not (rea_out / "breakdown.json").is_file() or force_rerun:
+                    run_rea_video_decompose(video_local, rea_out)
+                prompt = build_agent_prompt(
+                    video_path=video_local,
+                    image_paths=image_locals,
+                    rea_out_dir=rea_out,
+                    output_json_path=scripts_out_path,
+                    product_name=product_name,
+                    task_name=task_name,
+                    analysis_prompt=analysis_prompt,
+                    script_count=script_count,
+                    script_cols=script_cols,
+                    engine=engine,
+                )
+                if engine == "antigravity":
+                    summary, scripts = run_antigravity_engine(prompt, rec_dir, scripts_out_path, script_cols, f"{product_name}-{task_name}")
+                else:
+                    summary, scripts = run_codex_engine(prompt, rec_dir, scripts_out_path, script_cols)
 
             # 5. Write generated scripts back to Feishu Bitable columns '脚本1'..'脚本N'
             post_progress(
