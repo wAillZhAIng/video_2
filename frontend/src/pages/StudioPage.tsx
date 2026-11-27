@@ -22,7 +22,7 @@ import type { QualitySettings } from '../lib/quality-contract';
 import '../studio.css';
 import '../asset-library.css';
 
-const nodeLabels: Record<string, string> = { character_reference: '人物参考素材', character: '人物参考素材', scene_reference: '场景参考', scene: '场景参考', keyframe: '镜头关键画面', video: '分镜视频', tts: '角色配音', tts_optional: '可选配音', audio_mix: '对白混音', lip_sync: '口型同步', quality: '画质处理', quality_check: '视频技术检查', parse: 'Word 解析' };
+const nodeLabels: Record<string, string> = { character_reference: '人物参考素材', character: '人物参考素材', scene_reference: '场景参考', scene: '场景参考', keyframe: '镜头关键画面', video: '分镜视频', tts: '角色配音', tts_optional: '可选配音', audio_mix: '对白混音', lip_sync: '口型同步', quality: '画质处理', quality_check: '视频技术检查', parse: 'Word 解析', assembly: '成片合成' };
 const repairStatusLabels:Record<string,string>={applied:'已执行',waiting:'等待',blocked:'受阻',skipped:'未执行',not_needed:'无需修复',unknown:'结果待核对',error:'诊断错误'};
 const connectionStatusLabels: Record<string, string> = { connected: '已连接', recovered: '已恢复', busy: '运行中',
   reachable: '有响应，待核对配置', unavailable: '运行时不可用', unsupported: '缺少适配器', failed: '连接失败' };
@@ -149,7 +149,7 @@ export function StudioPage() {
   const retryFinal = data?.run?.status === 'completed_with_errors' && ['blocked','failed','cancelled'].includes(autoFinal?.status);
   const importDisabled = pageBusy||preparationUnsettled||Boolean(pendingImport)||!file||quality.loading||quality.saving||!quality.profile||!quality.supported;
   const outputLink = `/?project=${encodeURIComponent(projectId)}#project-output`;
-  async function control(action: 'start' | 'pause' | 'resume' | 'retry', nodeId?: string) {
+  async function control(action: 'start' | 'pause' | 'resume' | 'retry', nodeId?: string, forceUnknown = false) {
     await perform(action, async () => {
       if((action==='start'||action==='resume')&&!framingReady)throw new Error('请先重新读取实际镜头画幅，确认镜头与编排状态后再开始或继续制作。');
       if(action==='start'&&(!quality.profile||!quality.supported))throw new Error('请先读取并核对制作画质配置。');
@@ -166,7 +166,7 @@ export function StudioPage() {
         if(!voices.ready_to_start)throw new Error(voices.blockers.join('；')||'角色配音条件未完成，请先配置。');
       }
       if(action==='start'&&quality.dirty)await quality.save();
-      const payload: PipelineStart | { node_id?: string } = action === 'start' ? { allow_cloud_costs: cloudCosts,allow_paid_fallback:paidFallback,quality:quality.settings } : nodeId ? { node_id: nodeId } : {};
+      const payload: PipelineStart | { node_id?: string; force_unknown?: boolean } = action === 'start' ? { allow_cloud_costs: cloudCosts,allow_paid_fallback:paidFallback,quality:quality.settings } : nodeId ? { node_id: nodeId, ...(forceUnknown ? { force_unknown: true } : {}) } : {};
       await request<StudioOverview>(`/api/studio/projects/${projectId}/${action}`, { method: 'POST', body: JSON.stringify(payload) });
       setNotice(action === 'pause' ? '已请求暂停后续任务；正在运行的模型请求以服务实际状态为准。' : '请求已提交，执行结果将在任务列表更新。');
     });
@@ -185,7 +185,7 @@ export function StudioPage() {
     setRepairReport(null);
     setRepairError('');setError('');setNotice('');setBusy('repair');
     try {
-      const report=await request<StudioRepairReport>(`/api/studio/projects/${projectId}/repair`,{method:'POST',body:'{}'});
+      const report=await request<StudioRepairReport>(`/api/studio/projects/${projectId}/repair`,{method:'POST',body:JSON.stringify({force_recover:true})});
       setRepairReport(report);
       const repaired = report.actions.some(action => action.status === 'applied')
         || report.model_connections?.some(service => service.status === 'recovered');
@@ -301,7 +301,7 @@ export function StudioPage() {
         const frozenRun=data.run?.snapshot_json;
         const frozenOrder=Array.isArray(frozenRun?.shot_ids)?frozenRun.shot_ids.indexOf(targetId)+1:0;
         const shot=shots.find(shot=>shot.id===targetId);
-        const retryable=['failed','blocked','waiting_user','waiting_exception','exception'].includes(item.status);
+        const retryable=['failed','blocked','waiting_user','waiting_exception','exception','unknown'].includes(item.status);
         const productMismatch=Boolean(runId&&nodeId&&shot&&retryable&&item.kind==='video'
           &&isProductReferenceError(item.code,message));
         const repairing=productMismatch&&repairNode===nodeId;
@@ -311,7 +311,7 @@ export function StudioPage() {
           {productMismatch?<button type="button" className="button button-secondary button-small" aria-expanded={repairing}
             disabled={pageBusy||repairing||productReferenceState.dirty||productReferenceState.busy||Boolean(repairState?.dirty)}
             onClick={()=>setProductRepair({scope:audioResolutionScope,nodeId})}>重新选择此镜头商品图</button>:
-            !audioTooLong&&nodeId&&retryable?<button type="button" className="button button-secondary button-small" disabled={pageBusy||Boolean(repairState?.dirty)} onClick={()=>void control('retry',nodeId)}>重试此任务</button>:null}
+            !audioTooLong&&nodeId&&retryable?<button type="button" className="button button-secondary button-small" disabled={pageBusy||Boolean(repairState?.dirty)} onClick={()=>void control('retry',nodeId,item.status==='unknown')}>重试此任务</button>:null}
           {repairing&&shot?<ProjectProductReferences key={`${audioResolutionScope}:${nodeId}`} projectId={projectId} shots={[shot]}
             retry={{runId,nodeId,shotId:shot.id}} disabled={pageBusy}
             onStateChange={state=>{if(audioResolutionScopeRef.current===audioResolutionScope)setProductRepairState({...state,scope:audioResolutionScope});}}

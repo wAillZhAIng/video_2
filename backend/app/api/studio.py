@@ -1,7 +1,7 @@
 """Unified workstation API; no UI progress is inferred from elapsed time."""
 import copy
 import asyncio
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -372,12 +372,38 @@ def retry(project_id: str, payload: dict | None = None, session: Session = Depen
     selected = [n for n in nodes if (targets is None or n['id'] in targets) and n['status'] in {'exception', 'failed', 'unknown'}]
     if targets is not None and {n['id'] for n in selected} != targets:
         raise AppError(409, 'studio_retry_scope', '指定节点中有节点已经恢复或不在本轮失败列表')
+    force_unknown = bool(options.get('force_unknown'))
     unresolved_unknown = []
     for n in selected:
         if n['status'] == 'unknown':
             job_id = n.get('child_id') or n.get('job_id') or n.get('external_id') or n.get('ref_id')
             from app.models import GenerationJob as _GJ
             job_row = session.get(_GJ, job_id) if job_id else None
+            if force_unknown:
+                from app.services.studio_full_repair import (
+                    _close_generation_job,
+                    _close_blocking_quality_renders,
+                    _close_blocking_media_tasks,
+                )
+                if n.get('kind') == 'video' and job_row and job_row.status in {'unknown', 'submitting', 'queued', 'running'}:
+                    _close_generation_job(job_row, 'operator_retry_unknown', close_as_unknown=True)
+                elif n.get('kind') == 'quality':
+                    _close_blocking_quality_renders(session, n.get('source_video_id'), job_id)
+                elif n.get('kind') in {'tts', 'audio_mix', 'lip_sync'}:
+                    _close_blocking_media_tasks(session, run.project_id, n.get('shot_id') or n.get('target_id'), n['kind'], job_id)
+                elif n.get('kind') in {'scene', 'keyframe'} and job_id:
+                    vis = session.get(m.ProductionVisual, job_id)
+                    if vis and vis.status in {'unknown', 'submitting'}:
+                        vis.status = 'failed'
+                        vis.error_message = (vis.error_message or '原画面任务未知') + '（已由人工重试关闭）'
+                elif n.get('kind') == 'character' and job_id:
+                    batch = session.get(m.CharacterBatch, job_id)
+                    if batch:
+                        batch.status = 'failed'
+                        for cj in session.scalars(select(m.CharacterGenerationJob).where(m.CharacterGenerationJob.batch_id == batch.id)):
+                            if cj.status in {'unknown', 'submitting'}:
+                                cj.status = 'failed'
+                continue
             if not (job_row and job_row.status in {'closed_unknown', 'failed'}):
                 unresolved_unknown.append(n['id'])
     if unresolved_unknown:
@@ -405,12 +431,13 @@ def retry(project_id: str, payload: dict | None = None, session: Session = Depen
 
 
 @router.post('/projects/{project_id}/repair')
-async def repair(project_id: str, request: Request, session: Session = Depends(get_db)):
+async def repair(project_id: str, request: Request, session: Session = Depends(get_db), payload: dict | None = Body(default=None)):
     from app.services.studio_project_guard import project_guard
+    force_recover = bool(payload.get('force_recover', False)) if isinstance(payload, dict) else False
     async with project_guard(request.app, project_id) as nested:
         if not nested and not session.dirty and not session.new:
             session.expire_all()
-        return await _repair(project_id, request, session)
+        return await _repair(project_id, request, session, force_recover=force_recover)
 
 
 @router.post('/projects/{project_id}/quality/apply')
@@ -426,11 +453,12 @@ async def apply_quality(project_id: str, request: Request, payload: dict | None 
         session.commit();return result
 
 
-async def _repair(project_id: str, request: Request, session: Session):
-    """Diagnose a stuck run and resume only tasks with a known-safe next step."""
+async def _repair(project_id: str, request: Request, session: Session, *, force_recover: bool = False):
+    """Diagnose a stuck run and recover all safe / force-recoverable stuck states."""
     from app.services.gpu_gate import owned_model_status
     from app.services.studio_pipeline import RUN_TERMINAL, advance_pipeline
     from app.services.studio_model_recovery import recover_model_connections, interrupted_native_nodes
+    from app.services.studio_full_repair import collect_comfy_probes, inspect_comfy_state, repair_stuck_run
 
     original_run_id = _run(session, project_id).id
     model_connections = await recover_model_connections(request.app, session)
@@ -445,6 +473,17 @@ async def _repair(project_id: str, request: Request, session: Session):
         recovery = await interrupted_native_nodes(session, run, model_connections)
         session.expire_all()
         run = _run(session, project_id)
+
+    comfy_state = {'queues': {}, 'histories': {}}
+    if run.id == original_run_id and not run.snapshot_json.get('product_references_changed'):
+        other_runs = list(session.scalars(
+            select(StudioRun).where(StudioRun.id != run.id, StudioRun.status.not_in(list(RUN_TERMINAL)))
+        ))
+        probe_urls, prompt_probes = collect_comfy_probes(session, request.app.state.settings, run, other_runs)
+        if probe_urls:
+            comfy_state = await inspect_comfy_state(probe_urls, prompt_probes)
+            session.expire_all()
+            run = _run(session, project_id)
     def report(actions, blockers):
         return {'project_id': project_id, 'run_id': run.id, 'run_status': run.status,
                 'gpu_gate': gpu, 'actions': actions, 'blockers': blockers, 'model_connections': model_connections}
@@ -475,7 +514,43 @@ async def _repair(project_id: str, request: Request, session: Session):
         session,request.app.state.settings,run,nodes)
     keyframe_candidates={item['id'] for item in recoverable_keyframes}
     keyframe_reported={item['node_id'] for item in keyframe_blockers}
-    blockers.extend(keyframe_blockers)
+    if not force_recover:
+        blockers.extend(keyframe_blockers)
+
+    full_repair = repair_stuck_run(
+        session,
+        request.app.state.settings,
+        run,
+        nodes,
+        comfy_state=comfy_state,
+        gpu=gpu,
+        force_recover=force_recover,
+        skip_node_ids=keyframe_candidates,
+    )
+    if full_repair['mutated']:
+        run.nodes_json = nodes
+        sync_production_status(session, run)
+        session.add(m.AuditEvent(
+            object_type='studio_run',
+            object_id=run.id,
+            action='one_click_full_repair',
+            details_json={
+                'force_recover': force_recover,
+                'repaired_nodes': full_repair['repaired_nodes'],
+                'adopted_nodes': full_repair['adopted_nodes'],
+                'resumed_nodes': full_repair['resumed_nodes'],
+                'unblocked_waiting': full_repair['unblocked_waiting'],
+                'unblocked_other_runs': full_repair['unblocked_other_runs'],
+                'assembly_requeued': full_repair['assembly_requeued'],
+                'run_reopened': full_repair['run_reopened'],
+            },
+        ))
+        session.commit()
+        actions.extend(full_repair['actions'])
+    blockers.extend(full_repair['blockers'])
+    if force_recover and keyframe_blockers:
+        repaired_kf_ids = {x['node_id'] for x in full_repair['repaired_nodes']} | {x['node_id'] for x in full_repair['resumed_nodes']}
+        blockers.extend(b for b in keyframe_blockers if b.get('node_id') not in repaired_kf_ids)
 
     def character_capability_ready(item):
         """Match the current image adapter to the run's frozen route/snapshot.
@@ -621,9 +696,11 @@ async def _repair(project_id: str, request: Request, session: Session):
             blockers.append({'node_id': item.get('id'), 'kind': item.get('kind'),
                              'status': item.get('status'), 'code': item.get('code'),
                              'message': '任务已结束且不是可恢复的 completed_with_errors 状态；人物节点未重排。'})
+    has_applied_repair = any(item.get('status') == 'applied' for item in actions)
     if not queued_visual:
-        actions.append({'code': 'no_queued_visual', 'status': 'not_needed',
-                        'message': '没有可安全续派的已排队场景或关键帧任务。'})
+        if not has_applied_repair:
+            actions.append({'code': 'no_queued_visual', 'status': 'not_needed',
+                            'message': '没有可安全续派的已排队场景或关键帧任务。'})
     elif not run_can_dispatch:
         actions.append({'code': 'run_not_active', 'status': 'skipped',
                         'message': '任务当前已暂停或结束；保留队列，不越过运行控制。',
@@ -684,6 +761,18 @@ async def _repair(project_id: str, request: Request, session: Session):
             actions.append({'code': 'visual_dispatch_failed', 'status': current_status,
                             'message': refreshed.error_message if refreshed else '视觉记录已不存在。',
                             'visual_id': queued_visual.id})
+
+    if full_repair['mutated'] and run.status in {'queued', 'running'} and gpu['state'] == 'idle':
+        worker_error = None
+        try:
+            await advance_pipeline(request.app, request.app.state.settings, session, run)
+        except Exception as exc:
+            worker_error = type(exc).__name__
+        session.expire_all()
+        run = _run(session, project_id)
+        if worker_error:
+            actions.append({'code': 'full_repair_advance_warning', 'status': 'waiting',
+                            'message': f'节点已重置入队；立即推进时遇到 {worker_error}，后台工作器将自动继续。'})
 
     session.add(m.AuditEvent(object_type='studio_run', object_id=run.id,
         action='one_click_repair_diagnosed', details_json={
