@@ -216,12 +216,14 @@ def batch_dto(session: Session, batch: FeishuGenerationBatch) -> dict[str, Any]:
             .order_by(FeishuGenerationQueueItem.order_index, FeishuGenerationQueueItem.created_at)
         )
     )
+    archived_items = sum(1 for x in items if x.archived_local_path)
     return {
         "id": batch.id,
         "status": batch.status,
         "archive_dir": batch.archive_dir,
         "total_items": batch.total_items,
         "completed_items": batch.completed_items,
+        "archived_items": archived_items,
         "failed_items": batch.failed_items,
         "options": dict(batch.options_json or {}),
         "download_report": dict(batch.download_report_json or {}),
@@ -764,7 +766,10 @@ def trigger_batch_redownload(session: Session, batch_id: str) -> dict[str, Any]:
     )
     if not completed:
         raise AppError(409, "feishu_batch_no_outputs", "该批次尚无已完成的成片可下载")
-    batch.status = "ready_for_download"
+    for item in completed:
+        item.archived_local_path = None
+    if batch.status not in ("queued", "running"):
+        batch.status = "ready_for_download"
     batch.error_message = None
     session.commit()
     return batch_dto(session, batch)
@@ -988,10 +993,15 @@ def advance_feishu_queue_once(session: Session, settings) -> bool:
             batch.failed_items = failed_n
             changed = True
         if items and terminal_n == len(items):
-            has_outputs = any(x.status == "completed" and x.output_relative_path for x in items)
-            batch.status = "ready_for_download" if has_outputs else "failed"
-            if not has_outputs:
+            completed_with_output = [x for x in items if x.status == "completed" and x.output_relative_path]
+            if not completed_with_output:
+                batch.status = "failed"
                 batch.error_message = "本批次没有成功生成的视频成片"
+            elif all(x.archived_local_path for x in completed_with_output):
+                batch.status = "archived"
+                batch.error_message = None
+            else:
+                batch.status = "ready_for_download"
             batch.finished_at = utcnow()
             changed = True
     if changed:
@@ -1050,46 +1060,80 @@ def _safe_filename(name: str, fallback: str = "video") -> str:
 
 
 def claim_next_download_batch(session: Session) -> dict[str, Any] | None:
-    batch = session.scalar(
-        select(FeishuGenerationBatch)
-        .where(FeishuGenerationBatch.status == "ready_for_download")
-        .order_by(FeishuGenerationBatch.created_at.asc())
-        .limit(1)
-    )
-    if not batch:
-        return None
-    items = list(
+    """Claim any completed, not-yet-archived videos immediately — even while the batch is still running."""
+    candidate_batches = list(
         session.scalars(
-            select(FeishuGenerationQueueItem)
-            .where(
-                FeishuGenerationQueueItem.batch_id == batch.id,
-                FeishuGenerationQueueItem.status == "completed",
-                FeishuGenerationQueueItem.output_relative_path.is_not(None),
-            )
-            .order_by(FeishuGenerationQueueItem.order_index)
+            select(FeishuGenerationBatch)
+            .where(FeishuGenerationBatch.status.in_(["running", "ready_for_download", "queued", "downloading", "archived", "cancelled"]))
+            .order_by(FeishuGenerationBatch.created_at.asc())
         )
     )
-    batch.status = "downloading"
-    session.commit()
+    target_batch: FeishuGenerationBatch | None = None
+    pending_items: list[FeishuGenerationQueueItem] = []
+    for batch in candidate_batches:
+        unarchived = list(
+            session.scalars(
+                select(FeishuGenerationQueueItem)
+                .where(
+                    FeishuGenerationQueueItem.batch_id == batch.id,
+                    FeishuGenerationQueueItem.status == "completed",
+                    FeishuGenerationQueueItem.output_relative_path.is_not(None),
+                    FeishuGenerationQueueItem.archived_local_path.is_(None),
+                )
+                .order_by(FeishuGenerationQueueItem.order_index, FeishuGenerationQueueItem.created_at)
+            )
+        )
+        if unarchived:
+            target_batch = batch
+            pending_items = unarchived
+            break
+
+    if not target_batch:
+        return None
+
+    # Only mark batch status as "downloading" if generation has already reached ready_for_download;
+    # keep "running" intact so serial generation continues uninterrupted alongside live downloads.
+    if target_batch.status == "ready_for_download":
+        target_batch.status = "downloading"
+        session.commit()
+
+    # Check whether multiple items in this batch share the same (product_folder, base_file)
+    all_batch_items = list(
+        session.scalars(
+            select(FeishuGenerationQueueItem)
+            .where(FeishuGenerationQueueItem.batch_id == target_batch.id)
+        )
+    )
+    name_counts: dict[tuple[str, str], int] = {}
+    for x in all_batch_items:
+        pf = _safe_filename(x.product_name, "未命名产品")
+        bf = _safe_filename(f"{x.task_name or x.product_name}_{x.script_column}", f"video_{x.script_index}")
+        name_counts[(pf, bf)] = name_counts.get((pf, bf), 0) + 1
+
     manifest = []
-    for item in items:
+    for item in pending_items:
         ext = Path(item.output_relative_path or "video.mp4").suffix or ".mp4"
         product_folder = _safe_filename(item.product_name, "未命名产品")
         base_file = _safe_filename(f"{item.task_name or item.product_name}_{item.script_column}", f"video_{item.script_index}")
+        if name_counts.get((product_folder, base_file), 1) > 1:
+            filename = f"{int(item.order_index or item.script_index):02d}_{base_file}{ext}"
+        else:
+            filename = f"{base_file}{ext}"
         manifest.append({
             "item_id": item.id,
+            "order_index": item.order_index,
             "product_name": item.product_name,
             "product_folder": product_folder,
             "task_name": item.task_name,
             "script_index": item.script_index,
             "script_column": item.script_column,
-            "filename": f"{base_file}{ext}",
+            "filename": filename,
             "output_relative_path": item.output_relative_path,
             "download_url": f"/api/feishu/bridge/download/{item.id}",
         })
     return {
-        "batch_id": batch.id,
-        "archive_dir": batch.archive_dir or r"E:\vast视频",
+        "batch_id": target_batch.id,
+        "archive_dir": target_batch.archive_dir or r"E:\vast视频",
         "items": manifest,
     }
 
@@ -1099,13 +1143,50 @@ def complete_download_batch(session: Session, batch_id: str, payload: dict[str, 
     if not batch:
         raise AppError(404, "feishu_batch_missing", "批量生成任务不存在")
     ok = bool(payload.get("ok", True))
+    is_partial = bool(payload.get("partial", False))
     archived_map = payload.get("archived_paths") or {}
     for item_id, local_path in archived_map.items():
         item = session.get(FeishuGenerationQueueItem, item_id)
-        if item and item.batch_id == batch.id:
+        if item and item.batch_id == batch.id and local_path:
             item.archived_local_path = str(local_path)[:1000]
-    batch.download_report_json = dict(payload)
-    batch.status = "archived" if ok else "ready_for_download"
-    batch.error_message = None if ok else str(payload.get("error_message") or "本地下载归档失败")
+
+    all_items = list(
+        session.scalars(
+            select(FeishuGenerationQueueItem).where(FeishuGenerationQueueItem.batch_id == batch.id)
+        )
+    )
+    archived_total = sum(1 for x in all_items if x.archived_local_path)
+    has_active_generation = any(x.status not in TERMINAL_ITEM_STATUSES for x in all_items)
+    has_unarchived_outputs = any(
+        x.status == "completed" and x.output_relative_path and not x.archived_local_path
+        for x in all_items
+    )
+
+    prev_report = dict(batch.download_report_json or {})
+    merged_paths = dict(prev_report.get("archived_paths") or {})
+    merged_paths.update({k: str(v) for k, v in archived_map.items() if v})
+    batch.download_report_json = {
+        **prev_report,
+        **dict(payload),
+        "archived_count": archived_total,
+        "archived_paths": merged_paths,
+    }
+
+    if has_active_generation:
+        # Batch is still generating remaining items — keep it running!
+        if batch.status in ("ready_for_download", "downloading"):
+            batch.status = "running"
+        if not ok and not is_partial and payload.get("error_message"):
+            batch.error_message = str(payload["error_message"])[:500]
+        elif ok:
+            batch.error_message = None
+    else:
+        if not has_unarchived_outputs and (ok or archived_total > 0):
+            batch.status = "archived"
+            batch.error_message = None
+        else:
+            batch.status = "ready_for_download"
+            if not ok and not is_partial:
+                batch.error_message = str(payload.get("error_message") or "本地下载归档失败")
     session.commit()
     return batch_dto(session, batch)

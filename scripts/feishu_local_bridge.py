@@ -1188,63 +1188,124 @@ def process_download_batch(manifest: dict[str, Any]) -> None:
     archive_root = Path(manifest.get("archive_dir") or str(ARCHIVE_DIR_DEFAULT))
     archive_root.mkdir(parents=True, exist_ok=True)
     items = manifest.get("items") or []
-    log(f"Auto-downloading batch {batch_id} ({len(items)} videos) to {archive_root}")
+    if not items:
+        return
+    log(f"Auto-downloading {len(items)} completed video(s) for batch {batch_id} -> {archive_root}")
 
     archived_paths: dict[str, str] = {}
     errors: list[str] = []
     try:
-        with httpx.Client(timeout=300.0, follow_redirects=True) as client:
-            for item in items:
-                item_id = item["item_id"]
-                product_folder = safe_name(item.get("product_folder") or item.get("product_name") or "未命名产品", "未命名产品")
-                filename = safe_name(item.get("filename") or f"{item_id}.mp4", f"{item_id}.mp4")
-                if not Path(filename).suffix:
-                    filename += ".mp4"
-                url = f"{VIDEO2_API_URL}{item['download_url']}"
+        for item in items:
+            item_id = item["item_id"]
+            product_folder = safe_name(item.get("product_folder") or item.get("product_name") or "未命名产品", "未命名产品")
+            filename = safe_name(item.get("filename") or f"{item_id}.mp4", f"{item_id}.mp4")
+            if not Path(filename).suffix:
+                filename += ".mp4"
+            url = f"{VIDEO2_API_URL}{item['download_url']}"
 
-                # Step A: Download into E:\vast视频\<tmp_filename>
-                tmp_download = archive_root / f".downloading_{item_id}_{filename}"
-                with client.stream("GET", url) as resp:
-                    if resp.status_code != 200:
-                        errors.append(f"{item_id}: HTTP {resp.status_code}")
-                        continue
-                    with tmp_download.open("wb") as fh:
-                        for chunk in resp.iter_bytes(65536):
-                            fh.write(chunk)
+            target_dir = archive_root / product_folder
+            target_dir.mkdir(parents=True, exist_ok=True)
+            tmp_download = target_dir / f".downloading_{item_id}_{filename}"
 
-                # Step B: Archive into E:\vast视频\<产品名称>\<filename>
-                target_dir = archive_root / product_folder
-                target_dir.mkdir(parents=True, exist_ok=True)
-                target_path = target_dir / filename
-                if target_path.exists():
+            downloaded_ok = False
+            last_err = ""
+            for attempt in range(1, 4):
+                try:
+                    _TUNNEL.ensure()
+                    with httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0), follow_redirects=True) as client:
+                        with client.stream("GET", url) as resp:
+                            if resp.status_code != 200:
+                                last_err = f"HTTP {resp.status_code}"
+                                if resp.status_code < 500:
+                                    break
+                                time.sleep(2 * attempt)
+                                continue
+                            expected_len = int(resp.headers.get("content-length") or 0)
+                            written = 0
+                            with tmp_download.open("wb") as fh:
+                                for chunk in resp.iter_bytes(262144):
+                                    if chunk:
+                                        fh.write(chunk)
+                                        written += len(chunk)
+                            if written <= 0 or (expected_len > 0 and written < expected_len):
+                                last_err = f"incomplete download ({written}/{expected_len} bytes)"
+                                tmp_download.unlink(missing_ok=True)
+                                time.sleep(2 * attempt)
+                                continue
+                            downloaded_ok = True
+                            break
+                except Exception as exc:
+                    last_err = f"{type(exc).__name__}: {exc}"
+                    tmp_download.unlink(missing_ok=True)
+                    log(f"Download {item_id} attempt {attempt}/3 failed: {last_err}")
+                    _TUNNEL.ensure()
+                    time.sleep(min(3 * attempt, 9))
+
+            if not downloaded_ok:
+                errors.append(f"{item_id}: {last_err}")
+                continue
+
+            # Move atomically into E:\vast视频\<产品名称>\<filename>
+            target_path = target_dir / filename
+            if target_path.exists():
+                if target_path.stat().st_size == tmp_download.stat().st_size:
+                    tmp_download.unlink(missing_ok=True)
+                else:
                     stem = target_path.stem
                     suffix = target_path.suffix
                     counter = 2
                     while target_path.exists():
                         target_path = target_dir / f"{stem}_{counter}{suffix}"
                         counter += 1
+                    shutil.move(str(tmp_download), str(target_path))
+            else:
                 shutil.move(str(tmp_download), str(target_path))
-                archived_paths[item_id] = str(target_path)
-                log(f"Archived -> {target_path}")
 
-        httpx.post(
-            f"{VIDEO2_API_URL}/api/feishu/bridge/download/{batch_id}/complete",
-            json={
+            archived_paths[item_id] = str(target_path)
+            size_mb = target_path.stat().st_size / (1024 * 1024)
+            log(f"Archived -> {target_path} ({size_mb:.1f} MB)")
+
+            # Report each completed item immediately so DB & UI update in real time
+            try:
+                video2_post(
+                    f"/api/feishu/bridge/download/{batch_id}/complete",
+                    json_body={
+                        "ok": True,
+                        "partial": True,
+                        "archive_dir": str(archive_root),
+                        "archived_count": 1,
+                        "archived_paths": {item_id: str(target_path)},
+                    },
+                    timeout=30.0,
+                    retries=4,
+                )
+            except Exception as report_exc:
+                log(f"Per-item archive report warning for {item_id}: {report_exc}")
+
+        video2_post(
+            f"/api/feishu/bridge/download/{batch_id}/complete",
+            json_body={
                 "ok": len(errors) == 0 and len(archived_paths) > 0,
+                "partial": False,
                 "archive_dir": str(archive_root),
                 "archived_count": len(archived_paths),
                 "archived_paths": archived_paths,
                 "error_message": "; ".join(errors) if errors else None,
             },
             timeout=30.0,
+            retries=4,
         )
     except Exception as exc:
         log(f"Batch download {batch_id} failed: {exc}")
-        httpx.post(
-            f"{VIDEO2_API_URL}/api/feishu/bridge/download/{batch_id}/complete",
-            json={"ok": False, "archived_paths": archived_paths, "error_message": str(exc)[:1000]},
-            timeout=30.0,
-        )
+        try:
+            video2_post(
+                f"/api/feishu/bridge/download/{batch_id}/complete",
+                json_body={"ok": False, "partial": False, "archived_paths": archived_paths, "error_message": str(exc)[:1000]},
+                timeout=30.0,
+                retries=4,
+            )
+        except Exception as report_exc:
+            log(f"Failed reporting download error for {batch_id}: {report_exc}")
 
 
 def send_heartbeat() -> None:

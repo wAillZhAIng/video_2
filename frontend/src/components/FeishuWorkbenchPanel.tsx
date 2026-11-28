@@ -49,8 +49,8 @@ const syncStatusLabels: Record<string, string> = {
 
 const batchStatusLabels: Record<string, string> = {
   queued: '排队中',
-  running: '串行生成中',
-  ready_for_download: '全部视频已生成 · 等待本机自动下载归档',
+  running: '串行生成中（完成一条即自动下载归档）',
+  ready_for_download: '全部视频已生成 · 等待剩余成片下载归档',
   downloading: '正在自动下载至 E:\\vast视频 并按产品归档',
   archived: '已全部下载并按产品文件夹归档',
   failed: '批次存在失败',
@@ -472,7 +472,7 @@ export function FeishuWorkbenchPanel({
                     </Badge>
                   </strong>
                   <div className="toolbar">
-                    {['archived', 'ready_for_download', 'downloading'].includes(latestBatch.status) ? (
+                    {(['archived', 'ready_for_download', 'downloading'].includes(latestBatch.status) || Number(latestBatch.completed_items || 0) > 0) ? (
                       <button type="button" className="button button-secondary button-small" disabled={busy} onClick={() => void redownloadBatch(latestBatch.id)}>
                         <CloudDownload size={14} />重新下载归档至 {latestBatch.archive_dir}
                       </button>
@@ -485,7 +485,7 @@ export function FeishuWorkbenchPanel({
                   </div>
                 </div>
                 <p className="form-hint">
-                  进度：{latestBatch.completed_items}/{latestBatch.total_items} 已完成（失败 {latestBatch.failed_items}）· 归档根目录：<code>{latestBatch.archive_dir}</code>（按产品名称自动建子文件夹）
+                  进度：{latestBatch.completed_items}/{latestBatch.total_items} 已完成 · 已自动下载归档 {latestBatch.archived_items ?? 0} 条（失败 {latestBatch.failed_items}）· 归档根目录：<code>{latestBatch.archive_dir}</code>（完成一条即按产品名称自动归档）
                 </p>
                 <table className="management-table">
                   <thead>

@@ -220,3 +220,115 @@ def test_approval_request_and_final_video_path_resolution(client):
         session.add(render)
         session.commit()
         assert _resolve_project_final_video_path(session, proj.id) == "assemblies/test_final.mp4"
+
+
+
+def test_incremental_per_video_download_while_batch_running(client):
+    """Completed items must be claimed and archived immediately without waiting for the full batch."""
+    settings = client.app.state.settings
+    media_root = settings.media_root
+    Session = client.app.state.session_factory
+
+    out1 = media_root / "assemblies/inc/v1.mp4"
+    out2 = media_root / "assemblies/inc/v2.mp4"
+    out1.parent.mkdir(parents=True, exist_ok=True)
+    out1.write_bytes(b"video-1-bytes")
+    out2.write_bytes(b"video-2-bytes")
+
+    with Session() as s:
+        rec1 = m.FeishuSyncRecord(
+            feishu_app_token="app_inc",
+            feishu_table_id="tbl_inc",
+            feishu_record_id="rec_inc_1",
+            product_name="转向灯",
+            task_name="转向灯",
+        )
+        rec2 = m.FeishuSyncRecord(
+            feishu_app_token="app_inc",
+            feishu_table_id="tbl_inc",
+            feishu_record_id="rec_inc_2",
+            product_name="转向灯",
+            task_name="转向灯",
+        )
+        s.add_all([rec1, rec2])
+        s.flush()
+
+        batch = m.FeishuGenerationBatch(
+            status="running",
+            archive_dir=r"E:\vast视频",
+            total_items=2,
+            completed_items=1,
+            failed_items=0,
+        )
+        s.add(batch)
+        s.flush()
+        # Two records with same product/task/script_column -> must get deduplicated 01_/02_ filenames
+        it1 = m.FeishuGenerationQueueItem(
+            batch_id=batch.id,
+            sync_record_id=rec1.id,
+            feishu_record_id=rec1.feishu_record_id,
+            product_name="转向灯",
+            task_name="转向灯",
+            script_index=1,
+            script_column="脚本1",
+            script_text="script1",
+            status="completed",
+            output_relative_path="assemblies/inc/v1.mp4",
+            order_index=1,
+        )
+        it2 = m.FeishuGenerationQueueItem(
+            batch_id=batch.id,
+            sync_record_id=rec2.id,
+            feishu_record_id=rec2.feishu_record_id,
+            product_name="转向灯",
+            task_name="转向灯",
+            script_index=1,
+            script_column="脚本1",
+            script_text="script2",
+            status="running",
+            order_index=2,
+        )
+        s.add_all([it1, it2])
+        s.commit()
+
+        # 1. While batch is STILL running, item 1 is immediately claimable for download
+        m1 = svc.claim_next_download_batch(s)
+        assert m1 is not None
+        assert m1["batch_id"] == batch.id
+        assert len(m1["items"]) == 1
+        assert m1["items"][0]["item_id"] == it1.id
+        assert m1["items"][0]["filename"] == "01_转向灯_脚本1.mp4"
+        assert s.get(m.FeishuGenerationBatch, batch.id).status == "running"
+
+        # 2. Reporting item 1 archived keeps batch status == "running"
+        dto1 = svc.complete_download_batch(s, batch.id, {
+            "ok": True,
+            "partial": True,
+            "archived_paths": {it1.id: r"E:\vast视频\转向灯\01_转向灯_脚本1.mp4"},
+        })
+        assert dto1["status"] == "running"
+        assert dto1["archived_items"] == 1
+
+        # 3. Calling claim again right now yields None (item 1 already archived, item 2 still running)
+        assert svc.claim_next_download_batch(s) is None
+
+        # 4. Now item 2 finishes -> advance marks ready_for_download, claim yields ONLY item 2
+        it2_db = s.get(m.FeishuGenerationQueueItem, it2.id)
+        it2_db.status = "completed"
+        it2_db.output_relative_path = "assemblies/inc/v2.mp4"
+        s.commit()
+        svc.advance_feishu_queue_once(s, settings)
+        assert s.get(m.FeishuGenerationBatch, batch.id).status == "ready_for_download"
+
+        m2 = svc.claim_next_download_batch(s)
+        assert m2 is not None and len(m2["items"]) == 1
+        assert m2["items"][0]["item_id"] == it2.id
+        assert m2["items"][0]["filename"] == "02_转向灯_脚本1.mp4"
+
+        dto2 = svc.complete_download_batch(s, batch.id, {
+            "ok": True,
+            "partial": False,
+            "archived_paths": {it2.id: r"E:\vast视频\转向灯\02_转向灯_脚本1.mp4"},
+        })
+        assert dto2["status"] == "archived"
+        assert dto2["archived_items"] == 2
