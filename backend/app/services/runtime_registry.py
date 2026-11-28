@@ -9,7 +9,7 @@ from app.core.config import PROJECT_ROOT
 from app.core.errors import AppError
 from app.schemas_routing import RuntimeManifest, RuntimeReceipt
 
-MANIFEST_ROOT=Path('E:/VideoFactoryRuntime/manifests')
+MANIFEST_ROOT=Path(os.getenv('VIDEO_FACTORY_RUNTIME_MANIFEST_ROOT') or 'E:/VideoFactoryRuntime/manifests')
 FAMILIES={'cosyvoice3':('cosyvoice3.json','run_cosyvoice3.py','cosyvoice3-0.5b-2512'),
     'indextts25':('indextts25.json','run_indextts25.py','indextts-2.5'),
     'latentsync15':('latentsync15.json','run_latentsync15.py','latentsync-1.5'),
